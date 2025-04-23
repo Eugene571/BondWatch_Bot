@@ -1,4 +1,5 @@
 # bonds_get.bond_utils.py
+import logging
 from typing import Optional
 
 from bonds_get.bond_update import get_next_coupon
@@ -12,25 +13,43 @@ from database.db import BondsDatabase
 def process_amortizations(events: dict, current_date: Optional[datetime] = None) -> tuple | None:
     """
     Обрабатывает события амортизаций и погашений, выбирая ближайшее после текущей даты.
-
-    :param events: словарь событий, полученный от API
-    :param current_date: текущая дата (datetime.datetime объект)
-    :return: кортеж с датой и суммой ближайшего события амортизации или погашения или None
     """
     if current_date is None:
         current_date = datetime.now()
 
+    logging.info(f"Обрабатываем амортизации и погашения для даты: {current_date}")
+
     future_amorts = []
-    for event in events.get("data", []):
+    maturity_date = None
+
+    columns = events.get("columns", [])
+    logging.info(f"Колонки: {columns}")
+
+    for row in events.get("data", []):
+        event = dict(zip(columns, row))  # <-- преобразование списка в словарь
+        logging.info(f"Обрабатываем событие: {event}")
+
         amort_date = event.get("amortdate")
         if amort_date:
             parsed_date = datetime.strptime(amort_date, "%Y-%m-%d").date()
+            logging.info(f"Дата амортизации: {parsed_date}")
+
+            if event.get("data_source") == "maturity":
+                maturity_date = parsed_date
+                logging.info(f"Дата погашения: {maturity_date}")
+
             if parsed_date >= current_date.date():
                 future_amorts.append((parsed_date, event.get("value"), event.get("data_source")))
+                logging.info(f"Добавлено в будущее амортизации: {parsed_date}, {event.get('value')}")
 
-    if future_amorts:
-        return min(future_amorts, key=lambda x: x[0])
-    return None
+    nearest_amort = min(future_amorts, key=lambda x: x[0]) if future_amorts else None
+
+    if nearest_amort:
+        logging.info(f"Ближайшая амортизация: {nearest_amort[0]}, значение: {nearest_amort[1]}")
+    else:
+        logging.info("Не найдено ближайших амортизаций.")
+
+    return nearest_amort, maturity_date
 
 
 def process_offers(events):
@@ -52,35 +71,73 @@ def process_offers(events):
     return result
 
 
-async def save_bond_events(session: Session, tg_user_id: int, events: dict):
+async def save_bond_events(session: Session, tg_user_id: int, events):
     """
-    Сохраняет информацию о ближайших значащих событиях облигации в БД.
+    Сохраняет информацию о ближайших значащих событиях облигации в БД, используя данные с MOEX.
+    Поддерживает как dict (одна облигация), так и list (несколько).
     """
     current_date = datetime.now()
 
-    # Определяем облигацию в БД
-    bond = session.query(BondsDatabase).filter_by(user_id=tg_user_id, isin=events["isins"][0]).first()
+    # Логируем данные о событиях
+    logging.info(f"Начало сохранения событий для пользователя {tg_user_id}. Данные: {events}")
+
+    # Если events — это список, обработаем каждый элемент рекурсивно
+    if isinstance(events, list):
+        for item in events:
+            await save_bond_events(session, tg_user_id, item)
+        return
+
+    # Проверка, что мы действительно работаем со словарём
+    if not isinstance(events, dict):
+        logging.warning(f"⚠️ Некорректный формат данных в save_bond_events: {events}")
+        return
+
+    isin = events.get("isin")
+    name = events.get("name")
+
+    logging.info(f"Обработанные данные: ISIN = {isin}, Name = {name}")
+
+    if not isin:
+        logging.warning("⚠️ Пропущен ISIN, невозможно сохранить данные по облигации.")
+        return
+
+    bond = session.query(BondsDatabase).filter_by(isin=isin).first()
 
     if not bond:
+        logging.info(f"Облигация с ISIN {isin} не найдена в базе. Создаём новую.")
         bond = BondsDatabase(
-            user_id=tg_user_id,
-            isin=events["isins"][0],
-            name=events["name"],
+            isin=isin,
+            name=name,
             added_at=datetime.utcnow(),
         )
         session.add(bond)
-        session.flush()  # Получаем ID, если нужно
+        session.flush()
 
-    await get_next_coupon(events["isins"][0], None, bond, session)
+    # Обновляем купон через функцию
+    await get_next_coupon(isin, None, bond, session)
 
-    # Получаем следующую амортизацию
-    next_amort_event = process_amortizations(events.get("amortizations"), current_date)
+    # Обработка амортизаций: поддержка двух вариантов формата
+    if "columns" in events and "data" in events:
+        amortizations = events
+        logging.info("Обрабатываем амортизации из событий: 'columns' и 'data'.")
+    else:
+        amortizations = events.get("amortizations", {})
+        logging.info("Обрабатываем амортизации из другого источника.")
+
+    next_amort_event, maturity_date = process_amortizations(amortizations, current_date)
+
     if next_amort_event:
-        bond.next_amort_date = next_amort_event[0]
-        bond.next_amort_value = next_amort_event[1]
+        bond.amortization_date = next_amort_event[0]
+        bond.amortization_value = next_amort_event[1]
+        logging.info(f"Обновлены данные по амортизации: {next_amort_event[0]}, {next_amort_event[1]}")
+
+    if not bond.maturity_date and maturity_date:
+        bond.maturity_date = maturity_date
+        logging.info(f"Обновлена дата погашения: {maturity_date}")
 
     bond.last_updated = datetime.utcnow()
     session.commit()
+    logging.info(f"Данные по облигации с ISIN {isin} успешно сохранены в базе.")
 
 
 def format_bond_info(session: Session, tg_user_id: int, isin: str):

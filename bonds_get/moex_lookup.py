@@ -54,3 +54,21 @@ async def get_bond_coupons_from_moex(isin: str):
     except Exception as e:
         logging.error(f"❌ Ошибка при получении купонов с МОЕКС для {isin}: {e}")
         return []
+
+
+async def get_bond_amortizations_from_moex(isin: str):
+    """Получение амортизаций и погашения облигации с MOEX по ISIN через bondization.json."""
+    url = f"https://iss.moex.com/iss/securities/{isin}/bondization.json"
+    try:
+        logging.info(f"🔄 Запрос амортизаций к MOEX для ISIN {isin} по URL: {url}")
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            logging.debug(f"📦 Ответ от MOEX (амортизации) для {isin}: {json.dumps(data.get('amortizations'), indent=2, ensure_ascii=False)[:500]}...")
+
+        return data.get("amortizations", {"columns": [], "data": []})
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка при получении амортизаций с МОЕКС для {isin}: {e}")
+        return {"columns": [], "data": []}

@@ -35,7 +35,7 @@ async def get_next_coupon(isin: str, figi: str | None, bond: BondsDatabase, sess
             first = upcoming[0]
             logging.debug(f"💾 Первый купон для сохранения: {first}")
             bond.next_coupon_date = first["parsed_date"]
-            bond.next_coupon_value = first["couponValue"]
+            bond.next_coupon_value = float(first["couponValue"]) if first.get("couponValue") else None
             session.commit()
             logging.debug(f"💾 Commit завершён, купон сохранён: {bond.next_coupon_date}, {bond.next_coupon_value}")
             logging.info(f"✅ Данные купона обновлены через MOEX для {bond.isin}")

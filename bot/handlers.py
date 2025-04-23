@@ -12,6 +12,8 @@ from telegram.ext import (
 import re
 import logging
 from datetime import datetime
+
+from bonds_get.bond_utils import save_bond_events
 from bonds_get.moex_lookup import get_bond_coupons_from_moex
 from bonds_get.moex_name_lookup import get_bond_name_from_moex
 from database.db import get_session, User, BondsDatabase, UserTracking
@@ -131,6 +133,14 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logging.info(f"✅ Купонные данные загружены с MOEX для {bond.isin}")
         except Exception as e:
             logging.warning(f"❌ Ошибка при получении купонов с MOEX для {bond.isin}: {e}")
+
+    # Сохраняем события по облигации (купон, амортизация, погашение)
+    try:
+        moex_events = await get_bond_coupons_from_moex(bond.isin)
+        await save_bond_events(session, user.id, moex_events)
+        logging.info(f"✅ События по облигации {bond.isin} успешно сохранены.")
+    except Exception as e:
+        logging.warning(f"❌ Ошибка при обработке событий по {bond.isin}: {e}")
 
     # Добавляем отслеживание пользователю
     tracking = UserTracking(user_id=user.id, isin=bond.isin)
