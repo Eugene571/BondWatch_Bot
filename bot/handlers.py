@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 
 from bonds_get.bond_utils import save_bond_events
-from bonds_get.moex_lookup import get_bond_coupons_from_moex
+from bonds_get.moex_lookup import get_bondization_data_from_moex
 from bonds_get.moex_name_lookup import get_bond_name_from_moex
 from database.db import get_session, User, BondsDatabase, UserTracking
 
@@ -113,7 +113,7 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Если купонные данные отсутствуют — загружаем с MOEX
     if not bond.next_coupon_date or not bond.next_coupon_value:
         try:
-            coupons = await get_bond_coupons_from_moex(bond.isin)
+            bond_data = await get_bondization_data_from_moex(bond.isin)
             today = datetime.today().date()
 
             upcoming = [
@@ -121,7 +121,7 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "date": datetime.strptime(c["couponDate"], "%Y-%m-%d").date(),
                     "value": c["couponValue"]
                 }
-                for c in coupons
+                for c in bond_data.get("coupons", [])
                 if c.get("couponDate") and datetime.strptime(c["couponDate"], "%Y-%m-%d").date() >= today
             ]
 
@@ -136,8 +136,8 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Сохраняем события по облигации (купон, амортизация, погашение)
     try:
-        moex_events = await get_bond_coupons_from_moex(bond.isin)
-        await save_bond_events(session, user.id, moex_events)
+        bond_data = await get_bondization_data_from_moex(bond.isin)
+        await save_bond_events(session, user.id, bond_data)
         logging.info(f"✅ События по облигации {bond.isin} успешно сохранены.")
     except Exception as e:
         logging.warning(f"❌ Ошибка при обработке событий по {bond.isin}: {e}")

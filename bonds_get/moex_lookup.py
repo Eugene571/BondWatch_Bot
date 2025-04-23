@@ -1,74 +1,112 @@
 # bonds_get.moex_lookup.py
+
 import httpx
 import logging
-import json
+from datetime import datetime
+from typing import List, Optional
 
 
-async def get_bond_coupons_from_moex(isin: str):
-    """Получение купонов облигации с MOEX по ISIN через bondization.json."""
+async def get_bondization_data_from_moex(isin: str) -> dict:
+    """
+    Получение данных о купонах и амортизациях (включая погашение) по ISIN с MOEX.
+    Возвращает словарь:
+    {
+        "isin": str,
+        "coupons": List[dict],
+        "amortizations": List[dict],
+        "maturity_date": Optional[date]
+    }
+    """
     url = f"https://iss.moex.com/iss/securities/{isin}/bondization.json"
+    logging.info(f"🔄 Запрос bondization.json к MOEX для ISIN {isin}: {url}")
 
     try:
-        logging.info(f"🔄 Отправка запроса к MOEX для ISIN {isin} по URL: {url}")
-
         async with httpx.AsyncClient() as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
+            logging.info(f"📦 Ответ от MOEX для {isin} успешно получен")
 
-        # Логируем весь JSON-ответ (можно частично, если слишком много)
-        logging.info(f"📦 Ответ от MOEX для {isin}: {json.dumps(data, indent=2, ensure_ascii=False)[:3000]}...")
+        result = {
+            "isin": isin,
+            "coupons": [],
+            "amortizations": [],
+            "maturity_date": None
+        }
 
-        coupons_metadata = data.get("coupons", {}).get("columns", [])
+        # Обработка купонов
+        coupons_meta = data.get("coupons", {}).get("columns", [])
         coupons_data = data.get("coupons", {}).get("data", [])
 
-        # Безопасное определение индексов для нужных данных
         try:
-            idx_coupondate = coupons_metadata.index("coupondate")  # Дата купона
-            idx_value = coupons_metadata.index("value")  # Сумма купона
-            idx_percent = coupons_metadata.index("valueprc")  # Процент купона
+            idx_coupondate = coupons_meta.index("coupondate")
+            idx_value = coupons_meta.index("value")
+            idx_percent = coupons_meta.index("valueprc")
         except ValueError as e:
-            logging.error(f"❌ Не найдены нужные поля в bondization.json для {isin}: {e}")
-            return []
+            logging.warning(f"⚠️ Не найдены нужные поля купонов для {isin}: {e}")
+            idx_coupondate = idx_value = idx_percent = -1
 
-        coupons = []
         for row in coupons_data:
+            if idx_coupondate == -1:
+                break
             coupon_date = row[idx_coupondate]
-            coupon_value = row[idx_value] or 0
-            coupon_percent = row[idx_percent] or 0
-
             if not coupon_date:
-                logging.warning(f"⚠️ Пропущена строка с отсутствующей датой купона для {isin}")
-                continue  # Пропускаем строки без даты
-
-            coupons.append({
-                "couponDate": str(coupon_date),  # Преобразуем в строку
-                "couponValue": coupon_value,
-                "couponPercent": coupon_percent,
+                continue
+            result["coupons"].append({
+                "couponDate": str(coupon_date),
+                "couponValue": row[idx_value] or 0,
+                "couponPercent": row[idx_percent] or 0,
                 "type": "COUPON"
             })
 
-        logging.info(f"📈 Найдено {len(coupons)} купонов для {isin}")
-        return coupons
+        logging.info(f"📈 Найдено {len(result['coupons'])} купонов для {isin}")
+
+        # Обработка амортизаций и определение maturity_date
+        amort_meta = data.get("amortizations", {}).get("columns", [])
+        amort_data = data.get("amortizations", {}).get("data", [])
+
+        try:
+            idx_amortdate = amort_meta.index("amortdate")
+            idx_value = amort_meta.index("value")
+        except ValueError as e:
+            logging.warning(f"⚠️ Не найдены нужные поля амортизаций для {isin}: {e}")
+            idx_amortdate = idx_value = -1
+
+        maturity_candidate_dates = []
+
+        for row in amort_data:
+            if idx_amortdate == -1:
+                break
+            amort_date = row[idx_amortdate]
+            if not amort_date:
+                continue
+            result["amortizations"].append({
+                "amortDate": str(amort_date),
+                "amortValue": row[idx_value] or 0,
+                "type": "AMORTIZATION"
+            })
+            maturity_candidate_dates.append(amort_date)
+
+        logging.info(f"🏁 Найдено {len(result['amortizations'])} амортизаций для {isin}")
+
+        if maturity_candidate_dates:
+            try:
+                parsed_dates = [
+                    datetime.strptime(str(d), "%Y-%m-%d").date()
+                    for d in maturity_candidate_dates
+                ]
+                result["maturity_date"] = max(parsed_dates)
+                logging.info(f"🎯 Определена дата погашения: {result['maturity_date']}")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка при парсинге дат погашения: {e}")
+
+        return result
 
     except Exception as e:
-        logging.error(f"❌ Ошибка при получении купонов с МОЕКС для {isin}: {e}")
-        return []
-
-
-async def get_bond_amortizations_from_moex(isin: str):
-    """Получение амортизаций и погашения облигации с MOEX по ISIN через bondization.json."""
-    url = f"https://iss.moex.com/iss/securities/{isin}/bondization.json"
-    try:
-        logging.info(f"🔄 Запрос амортизаций к MOEX для ISIN {isin} по URL: {url}")
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            data = response.json()
-            logging.debug(f"📦 Ответ от MOEX (амортизации) для {isin}: {json.dumps(data.get('amortizations'), indent=2, ensure_ascii=False)[:500]}...")
-
-        return data.get("amortizations", {"columns": [], "data": []})
-
-    except Exception as e:
-        logging.error(f"❌ Ошибка при получении амортизаций с МОЕКС для {isin}: {e}")
-        return {"columns": [], "data": []}
+        logging.error(f"❌ Ошибка при получении bondization.json для {isin}: {e}")
+        return {
+            "isin": isin,
+            "coupons": [],
+            "amortizations": [],
+            "maturity_date": None
+        }
