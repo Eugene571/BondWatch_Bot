@@ -10,6 +10,7 @@ from database.db import init_db
 from apscheduler.schedulers.background import BackgroundScheduler
 import sys
 import os
+
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', errors='ignore')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8', errors='ignore')
 
@@ -18,12 +19,13 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,  # Можно оставить INFO вместо DEBUG, чтобы файл не забивался
+    level=logging.DEBUG,
     handlers=[
         logging.FileHandler("bot.log"),
-        logging.StreamHandler()  # <== Удалено: теперь не логирует в консоль
+        logging.StreamHandler()
     ]
 )
+logger = logging.getLogger(__name__)
 
 
 # Обработчик ошибок
@@ -46,10 +48,10 @@ def main():
     scheduler = BackgroundScheduler()
 
     # Добавляем задачу для проверки и уведомления о событиях
-#    scheduler.add_job(check_and_notify, 'interval', seconds=30, args=[app.bot])
+    #    scheduler.add_job(check_and_notify, 'interval', seconds=30, args=[app.bot])
 
     # Добавляем задачу для обновления данных облигаций раз в сутки
-#
+    #
     # Запускаем планировщик
     scheduler.start()
 
@@ -59,5 +61,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

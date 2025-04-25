@@ -71,6 +71,7 @@ class UserTracking(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, ForeignKey("users.tg_id"), nullable=False)
     isin = Column(String, ForeignKey("bonds_database.isin"), nullable=False)
+    quantity = Column(Integer, nullable=False, default=1)  # Новый столбец для хранения количества бумаг
     added_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="tracked_bonds")
