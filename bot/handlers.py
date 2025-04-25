@@ -143,7 +143,7 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.warning(f"MOEX купон не получен: {e}")
 
     # Сохраняем отслеживание бумаги для пользователя
-    tracking = UserTracking(user_id=user_db.id, isin=bond.isin)
+    tracking = UserTracking(user_id=user_db.tg_id, isin=bond.isin)
     session.add(tracking)
     session.commit()
 
@@ -179,7 +179,7 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ Количество для бумаги {bond.name or bond.isin} обновлено на {quantity}.")
         else:
-            tracking = UserTracking(user_id=user_db.id, isin=bond.isin, quantity=quantity)
+            tracking = UserTracking(user_id=user_db.tg_id, isin=bond.isin, quantity=quantity)
             session.add(tracking)
             session.commit()
             await update.message.reply_text(f"📌 Бумага {bond.name or bond.isin} добавлена! Количество: {quantity}")
@@ -351,3 +351,13 @@ def register_handlers(app: Application):
         ],
     )
     app.add_handler(change_quantity_conv)
+
+    # Конверсация для удаления облигации
+    remove_conv = ConversationHandler(
+        entry_points=[CommandHandler("remove", remove_command)],
+        states={
+            AWAITING_ISIN_TO_REMOVE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_remove_isin)],
+        },
+        fallbacks=[],
+    )
+    app.add_handler(remove_conv)
