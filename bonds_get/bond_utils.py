@@ -12,47 +12,58 @@ from database.db import BondsDatabase
 logger = logging.getLogger("bonds_get.bond_utils")  # Логгер с уникальным именем
 
 
-def process_amortizations(events: list, current_date: Optional[datetime] = None) -> tuple | None:
+def process_amortizations(events: list | dict, current_date: Optional[datetime] = None) -> tuple | None:
     """
-    Обрабатывает события амортизаций и погашений, выбирая ближайшее после текущей даты.
+    Обрабатывает амортизации и дату погашения. Принимает как список словарей, так и events['columns' + 'data'] формат.
+    Возвращает ближайшую амортизацию и дату погашения (если найдена).
     """
     if current_date is None:
         current_date = datetime.now()
 
-    logger.info(f"Обрабатываем амортизации и погашения для даты: {current_date}")
+    logger.info(f"Обрабатываем амортизации для даты: {current_date}")
 
     future_amorts = []
     maturity_date = None
 
-    # Проверяем, если events - это список и работаем с первым элементом
-    if isinstance(events, list) and len(events) > 0:
-        columns = events[0].get("columns", [])
-        logger.info(f"Колонки: {columns}")
+    # Обработка формата {"columns": [...], "data": [...]}
+    if isinstance(events, list) and all("amortDate" in e for e in events):
+        # Формат списка словарей (как в логе выше)
+        for event in events:
+            try:
+                amort_date = datetime.strptime(event.get("amortDate"), "%Y-%m-%d").date()
+                amort_value = event.get("amortValue")
+                event_type = event.get("type")
 
-        for row in events[0].get("data", []):
-            event = dict(zip(columns, row))  # Преобразуем строку данных в словарь
-            logging.info(f"Обрабатываем событие: {event}")
+                if amort_date >= current_date.date():
+                    future_amorts.append((amort_date, amort_value, event_type))
+                    logging.info(f"Будущая амортизация: {amort_date}, сумма: {amort_value}, тип: {event_type}")
+            except Exception as e:
+                logging.error(f"Ошибка при обработке амортизации: {event} — {e}")
 
-            amort_date = event.get("amortdate")
-            if amort_date:
-                parsed_date = datetime.strptime(amort_date, "%Y-%m-%d").date()
-                logging.info(f"Дата амортизации: {parsed_date}")
-
-                # Обработка события погашения
-                if event.get("data_source") == "maturity":
-                    maturity_date = parsed_date
-                    logging.info(f"Дата погашения: {maturity_date}")
-
-                if parsed_date >= current_date.date():
-                    future_amorts.append((parsed_date, event.get("value"), event.get("data_source")))
-                    logging.info(f"Добавлено в будущее амортизации: {parsed_date}, {event.get('value')}")
+    elif isinstance(events, dict) and "columns" in events and "data" in events:
+        columns = events.get("columns", [])
+        for row in events.get("data", []):
+            event = dict(zip(columns, row))
+            try:
+                amort_date = event.get("amortdate")
+                if amort_date:
+                    parsed_date = datetime.strptime(amort_date, "%Y-%m-%d").date()
+                    if event.get("data_source") == "maturity":
+                        maturity_date = parsed_date
+                        logger.info(f"Дата погашения установлена: {maturity_date}")
+                    elif parsed_date >= current_date.date():
+                        future_amorts.append((parsed_date, event.get("value_rub"), event.get("data_source")))
+            except Exception as e:
+                logging.error(f"Ошибка при разборе строки амортизации: {event} — {e}")
     else:
-        logging.error("Ошибка: события амортизации не содержат правильные данные или это пустой список.")
+        logging.warning("Формат амортизаций не распознан. Пропускаем обработку.")
 
     nearest_amort = min(future_amorts, key=lambda x: x[0]) if future_amorts else None
 
     if nearest_amort:
-        logging.info(f"Ближайшая амортизация: {nearest_amort[0]}, значение: {nearest_amort[1]}")
+        logging.info(f"Ближайшая амортизация: {nearest_amort[0]}, сумма: {nearest_amort[1]}")
+    else:
+        logging.info("Будущие амортизации не найдены.")
 
     return nearest_amort, maturity_date
 
@@ -83,21 +94,17 @@ async def save_bond_events(session: Session, tg_user_id: int, events):
     """
     current_date = datetime.now()
 
-    # Логируем данные о событиях
     logging.info(f"Начало сохранения событий для пользователя {tg_user_id}. Данные: {events}")
 
-    # Если events — это список, обработаем каждый элемент рекурсивно
     if isinstance(events, list):
         for item in events:
             await save_bond_events(session, tg_user_id, item)
         return
 
-    # Проверка, что мы действительно работаем со словарём
     if not isinstance(events, dict):
         logging.warning(f"⚠️ Некорректный формат данных в save_bond_events: {events}")
         return
 
-    # Попытка получить ISIN из альтернативных источников, если не указан явно
     if not events.get("isin"):
         isin_from_args = events.get("secid") or events.get("SECID") or events.get("bond_isin")
         if isin_from_args:
@@ -124,23 +131,29 @@ async def save_bond_events(session: Session, tg_user_id: int, events):
         session.add(bond)
         session.flush()
 
-    # Обновляем купон через функцию
     await get_next_coupon(isin, None, bond, session)
 
-    # Обработка амортизаций: поддержка двух вариантов формата
-    if "columns" in events and "data" in events:
+    # Устойчивое определение амортизаций
+    amortizations = []
+
+    if "amortizations" in events and isinstance(events["amortizations"], list):
+        amortizations = events["amortizations"]
+        logging.info("Амортизации получены в виде списка словарей.")
+    elif "columns" in events and "data" in events:
         amortizations = events
-        logging.info("Обрабатываем амортизации из событий: 'columns' и 'data'.")
+        logging.info("Амортизации получены в виде таблицы с columns + data.")
     else:
-        amortizations = events.get("amortizations", {})
-        logging.info("Обрабатываем амортизации из другого источника.")
+        logging.info("Амортизации не найдены или формат не поддерживается.")
 
     next_amort_event, maturity_date = process_amortizations(amortizations, current_date)
 
     if next_amort_event:
+        logging.info(f"Следующая амортизация: {next_amort_event[0]}, {next_amort_event[1]}")
         bond.amortization_date = next_amort_event[0]
         bond.amortization_value = next_amort_event[1]
         logging.info(f"Обновлены данные по амортизации: {next_amort_event[0]}, {next_amort_event[1]}")
+    else:
+        logging.info("Нет доступных амортизаций для обновления")
 
     if not bond.maturity_date and maturity_date:
         bond.maturity_date = maturity_date
@@ -149,6 +162,7 @@ async def save_bond_events(session: Session, tg_user_id: int, events):
     bond.last_updated = datetime.utcnow()
     session.commit()
     bond = session.query(BondsDatabase).filter_by(isin=isin).first()
+
     logger.debug(f"Дата погашения после коммита: {bond.maturity_date}")
     logging.info(f"Данные по облигации с ISIN {isin} успешно сохранены в базе.")
 

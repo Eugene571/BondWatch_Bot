@@ -103,8 +103,8 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Проверяем, сколько бумаг отслеживает пользователь
     tracking_count = session.query(UserTracking).filter_by(user_id=user_db.id).count()
-    if tracking_count >= 3:
-        await update.message.reply_text("❌ Ты уже отслеживаешь 3 бумаги. Удали одну, чтобы добавить новую.")
+    if tracking_count >= 10:
+        await update.message.reply_text("❌ Ты уже отслеживаешь 10 бумаг. Удали одну, чтобы добавить новую.")
         return ConversationHandler.END
 
     # Проверяем, отслеживает ли пользователь уже эту бумагу
@@ -241,15 +241,24 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not bond:
             continue
         name = bond.name or bond.isin
-        if bond.next_coupon_date and bond.next_coupon_value and bond.maturity_date:
-            total_coupon = ut.quantity * bond.next_coupon_value
-            text += f"• {name}:\n  🏷️ {bond.next_coupon_date} — купон {bond.next_coupon_value:.2f} руб.\n"
-            text += f"  💸🔙 {bond.maturity_date} — погашение\n"
-            text += f"  💰 Итого: {total_coupon:.2f} руб. для {ut.quantity} облигаций\n\n"
-        elif bond.next_coupon_date and bond.next_coupon_value and not bond.maturity_date:
+
+        if bond.next_coupon_date and bond.next_coupon_value and bond.maturity_date and not bond.amortization_date:
             total_coupon = ut.quantity * bond.next_coupon_value
             text += f"• {name}:\n  🏷️ {bond.next_coupon_date} — купон {bond.next_coupon_value:.2f} руб.\n"
             text += f"  💰 Итого: {total_coupon:.2f} руб. для {ut.quantity} облигаций\n"
+            text += f"  💸🔙 {bond.maturity_date} — погашение\n\n"
+
+        elif bond.next_coupon_date and bond.next_coupon_value and not bond.maturity_date:
+            total_coupon = ut.quantity * bond.next_coupon_value
+            text += f"• {name}:\n  🏷️ {bond.next_coupon_date} — купон {bond.next_coupon_value:.2f} руб.\n"
+            text += f"  💰 Итого: {total_coupon:.2f} руб. для {ut.quantity} облигаций\n\n"
+
+        elif bond.next_coupon_date and bond.next_coupon_value and bond.maturity_date and bond.amortization_date and bond.amortization_value:
+            total_coupon = ut.quantity * bond.next_coupon_value
+            text += f"• {name}:\n  🏷️ {bond.next_coupon_date} — купон {bond.next_coupon_value:.2f} руб.\n"
+            text += f"  💰 Итого: {total_coupon:.2f} руб. для {ut.quantity} облигаций\n"
+            text += f"  💸🔙 {bond.maturity_date} — погашение\n"
+            text += f"  ⬇️ Амортизация {bond.amortization_date} — {bond.amortization_value:.2f} руб.\n\n"
         else:
             text += f"• {name}:\n  ✨ Нет ближайших событий\n"
 

@@ -66,6 +66,7 @@ async def get_bondization_data_from_moex(isin: str) -> dict:
         amort_data = data.get("amortizations", {}).get("data", [])
 
         try:
+            idx_source = amort_meta.index("data_source")
             idx_amortdate = amort_meta.index("amortdate")
             idx_value = amort_meta.index("value")
         except ValueError as e:
@@ -83,6 +84,7 @@ async def get_bondization_data_from_moex(isin: str) -> dict:
             result["amortizations"].append({
                 "amortDate": str(amort_date),
                 "amortValue": row[idx_value] or 0,
+                "dataSource": row[idx_source] or "",
                 "type": "AMORTIZATION"
             })
             maturity_candidate_dates.append(amort_date)
@@ -99,7 +101,6 @@ async def get_bondization_data_from_moex(isin: str) -> dict:
                 logging.info(f"🎯 Определена дата погашения: {result['maturity_date']}")
             except Exception as e:
                 logging.warning(f"⚠️ Ошибка при парсинге дат погашения: {e}")
-
         return result
 
     except Exception as e:
