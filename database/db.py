@@ -27,6 +27,7 @@ class User(Base):
 
     tracked_bonds = relationship("UserTracking", back_populates="user", cascade="all, delete-orphan")
     subscription = relationship("Subscription", uselist=False, back_populates="user")  # Связь с подпиской
+    notifications = relationship("UserNotification", back_populates="user", cascade="all, delete-orphan")  # Добавлено свойство для уведомлений
 
 
 class Subscription(Base):
@@ -76,3 +77,24 @@ class UserTracking(Base):
 
     user = relationship("User", back_populates="tracked_bonds")
     bond = relationship("BondsDatabase", back_populates="tracking_users")
+
+
+class UserNotification(Base):
+    __tablename__ = "user_notifications"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.tg_id"), nullable=False)
+    bond_isin = Column(String, ForeignKey("bonds_database.isin"), nullable=False)
+    event_type = Column(String, nullable=False)  # Тип события (coupon, maturity)
+    event_date = Column(DateTime, nullable=False)  # Дата события
+    is_sent = Column(Boolean, default=False)  # Статус уведомления (отправлено или нет)
+    sent_at = Column(DateTime)  # Время отправки уведомления
+
+    user = relationship("User", back_populates="notifications")
+    bond = relationship("BondsDatabase")
+
+    def __init__(self, user_id, bond_isin, event_type, event_date):
+        self.user_id = user_id
+        self.bond_isin = bond_isin
+        self.event_type = event_type
+        self.event_date = event_date
