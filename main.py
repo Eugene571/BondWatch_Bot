@@ -1,19 +1,19 @@
-# main.py
-
+import asyncio
 import io
 import logging
-from telegram.ext import Application
-from telegram.ext import ContextTypes
+import sys
+import os
+from datetime import datetime, time
+
+from telegram.ext import Application, ContextTypes
 from config import TELEGRAM_TOKEN
 from bot.handlers import register_handlers
 from database.db import init_db
-from apscheduler.schedulers.background import BackgroundScheduler
-import sys
-import os
+from notification import check_and_notify_all
 
+# Настройка кодировки и логирования
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', errors='ignore')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8', errors='ignore')
-
 sys.stdout.reconfigure(encoding='utf-8')
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
@@ -28,36 +28,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Обработчик ошибок
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.error("Exception while handling update:", exc_info=context.error)
-
-
-# Основная точка входа
-def main():
+async def main():
+    # Инициализация БД
     logging.info("Initializing database...")
-    init_db()
+    await init_db()
 
+    # Создание приложения бота
     logging.info("Starting bot...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # Регистрация обработчиков
     register_handlers(app)
     app.add_error_handler(error_handler)
+    await check_and_notify_all(app)
+    # Запуск фоновых задач
+    app.job_queue.run_daily(
+        lambda ctx: asyncio.create_task(check_and_notify_all(ctx.application)),
+        time(hour=9, minute=0)
+    )
 
-    # Настройка APScheduler с использованием job queue
-    scheduler = BackgroundScheduler()
-
-    # Добавляем задачу для проверки и уведомления о событиях
-    #    scheduler.add_job(check_and_notify, 'interval', seconds=30, args=[app.bot])
-
-    # Добавляем задачу для обновления данных облигаций раз в сутки
-    #
-    # Запускаем планировщик
-    scheduler.start()
-
+    # Запуск бота
     logging.info("Bot started...")
-    app.run_polling()  # теперь без asyncio.run()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    # Бесконечный цикл
+    while True:
+        await asyncio.sleep(3600)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Exception while handling update:", exc_info=context.error)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

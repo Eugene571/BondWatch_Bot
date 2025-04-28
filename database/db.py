@@ -4,18 +4,23 @@ from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Forei
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from contextlib import asynccontextmanager
 
-engine = create_engine("sqlite:///bot.database")
-Session = sessionmaker(bind=engine)
+engine = create_async_engine("sqlite+aiosqlite:///bot.database")
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 Base = declarative_base()
 
 
-def get_session():
-    return Session()
+@asynccontextmanager
+async def get_session():
+    async with AsyncSessionLocal() as session:
+        yield session
 
 
-def init_db():
-    Base.metadata.create_all(engine)
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 
 class User(Base):
@@ -27,7 +32,8 @@ class User(Base):
 
     tracked_bonds = relationship("UserTracking", back_populates="user", cascade="all, delete-orphan")
     subscription = relationship("Subscription", uselist=False, back_populates="user")  # Связь с подпиской
-    notifications = relationship("UserNotification", back_populates="user", cascade="all, delete-orphan")  # Добавлено свойство для уведомлений
+    notifications = relationship("UserNotification", back_populates="user",
+                                 cascade="all, delete-orphan")  # Добавлено свойство для уведомлений
 
 
 class Subscription(Base):
@@ -98,3 +104,5 @@ class UserNotification(Base):
         self.bond_isin = bond_isin
         self.event_type = event_type
         self.event_date = event_date
+        self.is_sent = False
+        self.sent_at = datetime.utcnow()
