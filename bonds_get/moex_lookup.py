@@ -2,19 +2,21 @@
 
 import httpx
 import logging
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timedelta, date
+from typing import List, Optional, Dict
 
 
 async def get_bondization_data_from_moex(isin: str) -> dict:
     """
-    Получение данных о купонах и амортизациях (включая погашение) по ISIN с MOEX.
+    Получение данных о купонах, амортизациях и офертах с MOEX.
     Возвращает словарь:
     {
         "isin": str,
         "coupons": List[dict],
         "amortizations": List[dict],
-        "maturity_date": Optional[date]
+        "offers": List[dict],
+        "maturity_date": Optional[date],
+        "next_offer_date": Optional[date]
     }
     """
     url = f"https://iss.moex.com/iss/securities/{isin}/bondization.json"
@@ -31,7 +33,9 @@ async def get_bondization_data_from_moex(isin: str) -> dict:
             "isin": isin,
             "coupons": [],
             "amortizations": [],
-            "maturity_date": None
+            "offers": [],
+            "maturity_date": None,
+            "next_offer_date": None
         }
 
         # Обработка купонов
@@ -61,7 +65,7 @@ async def get_bondization_data_from_moex(isin: str) -> dict:
 
         logging.info(f"📈 Найдено {len(result['coupons'])} купонов для {isin}")
 
-        # Обработка амортизаций и определение maturity_date
+        # Обработка амортизаций
         amort_meta = data.get("amortizations", {}).get("columns", [])
         amort_data = data.get("amortizations", {}).get("data", [])
 
@@ -74,7 +78,6 @@ async def get_bondization_data_from_moex(isin: str) -> dict:
             idx_amortdate = idx_value = -1
 
         maturity_candidate_dates = []
-
         for row in amort_data:
             if idx_amortdate == -1:
                 break
@@ -89,8 +92,52 @@ async def get_bondization_data_from_moex(isin: str) -> dict:
             })
             maturity_candidate_dates.append(amort_date)
 
-        logging.info(f"🏁 Найдено {len(result['amortizations'])} амортизаций для {isin}")
+        # Обработка оферт
+        offers_meta = data.get("offers", {}).get("columns", [])
+        offers_data = data.get("offers", {}).get("data", [])
 
+        try:
+            idx_offerdate = offers_meta.index("offerdate")
+            idx_offertype = offers_meta.index("offertype")
+        except ValueError as e:
+            logging.warning(f"⚠️ Не найдены поля оферт для {isin}: {e}")
+            idx_offerdate = idx_offertype = -1
+
+        valid_offers = []
+        today = datetime.utcnow().date()
+
+        for row in offers_data:
+            if idx_offerdate == -1:
+                break
+
+            offer_type = row[idx_offertype] if idx_offertype != -1 else ""
+            # Пропускаем отмененные оферты
+            if "отмен" in offer_type.lower():
+                continue
+
+            offer_date_str = row[idx_offerdate]
+            if not offer_date_str:
+                continue
+
+            try:
+                offer_date = datetime.strptime(offer_date_str, "%Y-%m-%d").date()
+                # Фильтруем прошедшие оферты
+                if offer_date > today:
+                    valid_offers.append(offer_date)
+                    result["offers"].append({
+                        "offer_date": offer_date_str,
+                        "type": offer_type,
+                        "status": "UPCOMING"
+                    })
+            except Exception as e:
+                logging.error(f"Ошибка парсинга даты оферты {offer_date_str}: {e}")
+
+        # Определяем ближайшую оферту
+        if valid_offers:
+            result["next_offer_date"] = min(valid_offers)
+            logging.info(f"🎯 Ближайшая оферта: {result['next_offer_date']}")
+
+        # Определение даты погашения
         if maturity_candidate_dates:
             try:
                 parsed_dates = [
@@ -98,16 +145,19 @@ async def get_bondization_data_from_moex(isin: str) -> dict:
                     for d in maturity_candidate_dates
                 ]
                 result["maturity_date"] = max(parsed_dates)
-                logging.info(f"🎯 Определена дата погашения: {result['maturity_date']}")
+                logging.info(f"🏁 Дата погашения: {result['maturity_date']}")
             except Exception as e:
                 logging.warning(f"⚠️ Ошибка при парсинге дат погашения: {e}")
+
         return result
 
     except Exception as e:
-        logging.error(f"❌ Ошибка при получении bondization.json для {isin}: {e}")
+        logging.error(f"❌ Ошибка при получении данных для {isin}: {e}")
         return {
             "isin": isin,
             "coupons": [],
             "amortizations": [],
-            "maturity_date": None
+            "offers": [],
+            "maturity_date": None,
+            "next_offer_date": None
         }

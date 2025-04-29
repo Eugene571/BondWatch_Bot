@@ -13,19 +13,31 @@ async def get_next_coupon(isin: str, figi: str | None, bond: BondsDatabase, sess
     today = datetime.today().date()
 
     try:
-        # Получаем все данные о купонах и амортизациях, включая дату погашения
+        # Получаем все данные о купонах, амортизациях и офертах
         data = await get_bondization_data_from_moex(isin)
         coupons = data.get("coupons", [])
         amortizations = data.get("amortizations", [])
-        maturity_date = data.get("maturity_date")  # Получаем дату погашения
+        maturity_date = data.get("maturity_date")
+        next_offer_date = data.get("next_offer_date")  # Добавлено: получаем дату оферты
 
         logging.debug(f"🧾 Все купоны от MOEX для {isin}: {coupons}")
         logging.debug(f"💸 Все амортизации от MOEX для {isin}: {amortizations}")
-        # Обновляем дату погашения, если она была получена
+        logging.debug(f"📅 Получена дата оферты: {next_offer_date}")  # Логируем дату оферты
+
+        # Обновляем дату погашения и оферты
+        updates_made = False
         if maturity_date:
             bond.maturity_date = maturity_date
             logging.debug(f"📅 Дата погашения обновлена: {bond.maturity_date}")
-        session.commit()
+            updates_made = True
+
+        if next_offer_date:  # Добавлено: обновление offer_date
+            bond.offer_date = next_offer_date
+            logging.debug(f"📆 Дата оферты обновлена: {bond.offer_date}")
+            updates_made = True
+
+        if updates_made:
+            session.commit()
 
         # Обработка ближайшего купона
         upcoming = []
@@ -48,13 +60,13 @@ async def get_next_coupon(isin: str, figi: str | None, bond: BondsDatabase, sess
             bond.next_coupon_date = first["parsed_date"]
             bond.next_coupon_value = float(first["couponValue"]) if first.get("couponValue") else None
             logging.info(f"✅ Обновлён купон: {bond.next_coupon_date}, {bond.next_coupon_value}")
+            session.commit()
 
-        session.commit()
-
+        # Обработка амортизаций
         upcoming_amortizations = []
         for a in amortizations:
             if a.get("dataSource") != "amortization":
-                continue  # фильтруем строго по типу
+                continue
 
             raw_date = a.get("amortDate")
             if not raw_date:
@@ -74,10 +86,15 @@ async def get_next_coupon(isin: str, figi: str | None, bond: BondsDatabase, sess
             bond.amortization_date = first_amort["parsed_date"]
             bond.amortization_value = float(first_amort.get("amortValue") or 0)
             logger.info(f"✅ Обновлена амортизация: {bond.amortization_date}, {bond.amortization_value}")
+            session.commit()
 
-        session.commit()
+        # Фиксация всех изменений и логирование
         bond = session.query(BondsDatabase).filter_by(isin=isin).first()
-        logger.debug(f"Дата погашения после коммита: {bond.maturity_date}")
-        logger.debug(f"💾 Commit завершён: {bond}")
+        logger.debug(f"Обновленные данные: "
+                     f"погашение={bond.maturity_date}, "
+                     f"оферта={bond.offer_date}, "
+                     f"купон={bond.next_coupon_date}")
+        logger.debug(f"💾 Финализация коммита для {isin}")
     except Exception as e:
-        logging.warning(f"❌ Ошибка при обновлении данных купона и погашения для {isin}: {e}")
+        logging.error(f"❌ Критическая ошибка для {isin}: {e}", exc_info=True)
+        session.rollback()

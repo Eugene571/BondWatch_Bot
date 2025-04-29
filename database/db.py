@@ -95,14 +95,15 @@ class UserNotification(Base):
     event_date = Column(DateTime, nullable=False)  # Дата события
     is_sent = Column(Boolean, default=False)  # Статус уведомления (отправлено или нет)
     sent_at = Column(DateTime)  # Время отправки уведомления
-
+    days_left = Column(Integer)
     user = relationship("User", back_populates="notifications")
     bond = relationship("BondsDatabase")
 
-    def __init__(self, user_id, bond_isin, event_type, event_date):
+    def __init__(self, user_id, bond_isin, event_type, event_date, is_sent=False, sent_at=None, days_left=None):
         self.user_id = user_id
         self.bond_isin = bond_isin
         self.event_type = event_type
         self.event_date = event_date
-        self.is_sent = False
-        self.sent_at = datetime.utcnow()
+        self.is_sent = is_sent
+        self.sent_at = sent_at
+        self.days_left = days_left

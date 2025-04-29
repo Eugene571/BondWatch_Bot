@@ -1,6 +1,7 @@
 # notification.py
 import logging
 from datetime import datetime, timedelta
+from typing import Optional
 
 from sqlalchemy import select
 
@@ -41,8 +42,13 @@ async def check_and_notify_all(app: Application):
                             if user_tracking:
                                 logging.info(f"Notifying user {user.tg_id} about maturity")
                                 await notify_user_about_event(
-                                    app, user.tg_id, bond.isin, "maturity",
-                                    bond.maturity_date, bond, user, user_tracking
+                                    app=app,
+                                    bond=bond,
+                                    user=user,
+                                    user_tracking=user_tracking,
+                                    user_id=user.tg_id,
+                                    event_type="maturity",
+                                    event_date=bond.maturity_date
                                 )
 
                 # Проверка следующего купона (асинхронная версия)
@@ -61,8 +67,14 @@ async def check_and_notify_all(app: Application):
                             if user_tracking:
                                 logging.info(f"Notifying user {user.tg_id} about coupon")
                                 await notify_user_about_event(
-                                    app, user.tg_id, bond.isin, "coupon",
-                                    bond.next_coupon_date, bond, user, user_tracking
+                                    app=app,
+                                    bond=bond,
+                                    user=user,
+                                    user_tracking=user_tracking,
+                                    user_id=user.tg_id,
+                                    event_type="coupon",
+                                    event_date=bond.next_coupon_date
+
                                 )
 
                 # Проверка амортизации (асинхронная версия)
@@ -81,10 +93,39 @@ async def check_and_notify_all(app: Application):
                             if user_tracking:
                                 logging.info(f"Notifying user {user.tg_id} about amortization")
                                 await notify_user_about_event(
-                                    app, user.tg_id, bond.isin, "amortization",
-                                    bond.amortization_date, bond, user, user_tracking
+                                    app=app,
+                                    bond=bond,
+                                    user=user,
+                                    user_tracking=user_tracking,
+                                    user_id=user.tg_id,
+                                    event_type="amortization",
+                                    event_date=bond.amortization_date,
                                 )
-
+                # Обработка оферты (offer)
+                if bond.offer_date:
+                    days_left = (bond.offer_date - today).days
+                    logging.debug(f"Offer check: {bond.isin} days_left={days_left}")
+                    if 1 <= days_left <= 14:
+                        logging.debug(f"Processing offer for {bond.isin}, days left: {days_left}")
+                        users = await session.scalars(select(User))
+                        for user in users:
+                            logging.debug(f"Checking user_tracking for user {user.tg_id} and bond {bond.isin}")
+                            tracking = await session.execute(
+                                select(UserTracking).filter_by(user_id=user.tg_id, isin=bond.isin)
+                            )
+                            user_tracking = tracking.scalar()
+                            if user_tracking:
+                                logging.debug(f"User {user.tg_id} is tracking {bond.isin}")
+                                await notify_user_about_event(
+                                    app=app,
+                                    bond=bond,
+                                    user=user,
+                                    user_tracking=user_tracking,
+                                    user_id=user.tg_id,
+                                    event_type="offer",
+                                    event_date=bond.offer_date,
+                                    days_left=days_left,
+                                )
         except Exception as e:
             logging.error(f"Critical error in check_and_notify_all: {e}", exc_info=True)
 
@@ -105,18 +146,33 @@ async def manual_send_notifications(app: Application):
                     # Проверка даты погашения, купонов и амортизации
                     if bond.maturity_date and bond.maturity_date <= today + timedelta(days=7):
                         await notify_user_about_event(
-                            app, user.tg_id, bond.isin, "maturity", bond.maturity_date,
-                            bond, user, user_tracking
+                            app=app,
+                            bond=bond,  # Объект облигации
+                            user=user,  # Объект пользователя
+                            user_tracking=user_tracking,  # Объект UserTracking
+                            user_id=user.tg_id,  # ID пользователя
+                            event_type="maturity",
+                            event_date=bond.maturity_date,
                         )
                     if bond.next_coupon_date and bond.next_coupon_date == today + timedelta(days=1):
                         await notify_user_about_event(
-                            app, user.tg_id, bond.isin, "coupon", bond.next_coupon_date,
-                            bond, user, user_tracking
+                            app=app,
+                            bond=bond,  # Объект облигации
+                            user=user,  # Объект пользователя
+                            user_tracking=user_tracking,  # Объект UserTracking
+                            user_id=user.tg_id,  # ID пользователя
+                            event_type="coupon",
+                            event_date=bond.maturity_date,
                         )
                     if bond.amortization_date and bond.amortization_date == today + timedelta(days=1):
                         await notify_user_about_event(
-                            app, user.tg_id, bond.isin, "amortization", bond.amortization_date,
-                            bond, user, user_tracking
+                            app=app,
+                            bond=bond,  # Объект облигации
+                            user=user,  # Объект пользователя
+                            user_tracking=user_tracking,  # Объект UserTracking
+                            user_id=user.tg_id,  # ID пользователя
+                            event_type="amortization",
+                            event_date=bond.maturity_date,
                         )
 
 
@@ -135,16 +191,23 @@ async def async_send_notification(context):
         logging.exception(f"Error sending notification to user {user_id}: {e}")
 
 
-async def notify_user_about_event(app: Application, user_id: int, bond_isin: str, event_type: str,
-                                  event_date: datetime, bond, user, user_tracking):
+async def notify_user_about_event(
+        app: Application,
+        bond: BondsDatabase,
+        user: User,
+        user_tracking: UserTracking,
+        user_id: int,
+        event_type: str,
+        event_date: datetime,
+        days_left: Optional[int] = None,
+):
     try:
         async with get_session() as session:
+            bond_isin = bond.isin
             logging.debug(f"Attempting to notify user {user_id} about {event_type}")
-
-            # Асинхронный запрос вместо session.query()
             stmt = select(UserNotification).where(
                 UserNotification.user_id == user_id,
-                UserNotification.bond_isin == bond_isin,
+                UserNotification.bond_isin == bond_isin,  # <-- Важно!
                 UserNotification.event_type == event_type,
                 UserNotification.event_date == event_date
             )
@@ -152,40 +215,90 @@ async def notify_user_about_event(app: Application, user_id: int, bond_isin: str
             notification = result.scalar_one_or_none()
 
             if not notification:
-                quantity = user_tracking.quantity
                 message = ""
+                quantity = user_tracking.quantity if user_tracking else 0
 
-                # Формирование сообщения (оставляем оригинальную логику)
+                # Формирование сообщения с учетом типа события
                 if event_type == "coupon":
-                    total_coupon_value = bond.next_coupon_value * quantity if bond.next_coupon_value else 0
-                    message = f"Привет! {user.full_name}, по вашей облигации {bond.name} (ISIN: {bond_isin}) выплата купона {event_date.strftime('%d.%m.%Y')}. Сумма к получению: {total_coupon_value:.2f} руб."
+                    coupon_value = bond.next_coupon_value or 0
+                    total = coupon_value * quantity
+                    message = (
+                        f"Привет! {user.full_name}, по вашей облигации {bond.name} (ISIN: {bond_isin})\n"
+                        f"📅 Выплата купона {event_date.strftime('%d.%m.%Y')}\n"
+                        f"💰 Сумма к получению: {total:.2f} руб."
+                    )
+
                 elif event_type == "maturity":
-                    message = f"Привет! {user.full_name}, облигация {bond.name} (ISIN: {bond_isin}) погашается {event_date.strftime('%d.%m.%Y')}. Пожалуйста, учтите это."
+                    message = (
+                        f"Привет! {user.full_name}, облигация {bond.name} (ISIN: {bond_isin})\n"
+                        f"🏁 Погашение {event_date.strftime('%d.%m.%Y')}\n"
+                        "Рекомендуем подготовиться к получению номинала."
+                    )
+
                 elif event_type == "amortization":
-                    total_amortization_value = bond.amortization_value * quantity if bond.amortization_value else 0
-                    message = f"Привет! {user.full_name}, по вашей облигации {bond.name} (ISIN: {bond_isin}) частичное погашение (амортизация) {event_date.strftime('%d.%m.%Y')}. Сумма к получению: {total_amortization_value:.2f} руб."
+                    amort_value = bond.amortization_value or 0
+                    total = amort_value * quantity
+                    message = (
+                        f"Привет! {user.full_name}, по вашей облигации {bond.name} (ISIN: {bond_isin})\n"
+                        f"📉 Частичное погашение {event_date.strftime('%d.%m.%Y')}\n"
+                        f"💰 Сумма к получению: {total:.2f} руб."
+                    )
 
-                # Планируем отправку (сохраняем оригинальный подход)
-                job_data = {'user_id': user_id, 'message': message}
-                app.job_queue.run_once(async_send_notification, when=0, data=job_data)
+                elif event_type == "offer":
+                    logging.debug(f"Forming offer message. Days left: {days_left}")
+                    # Добавьте проверку days_left
+                    if days_left is None:
+                        logging.error("Days_left is None for offer event!")
+                        return
 
-                # Асинхронное сохранение уведомления
+                    def get_days_word(d: int) -> str:
+                        # Добавьте логирование
+                        try:
+                            if 11 <= d <= 14:
+                                return "дней"
+                            last = d % 10
+                            return {1: "день", 2: "дня", 3: "дня", 4: "дня"}.get(last, "дней")
+                        except Exception as e:
+                            logging.error(f"Error in get_days_word: {e}")
+                            return "дней"
+
+                    days_word = get_days_word(days_left) if days_left else "дней"
+                    message = (
+                        f"Привет! {user.full_name}, по вашей облигации {bond.name} (ISIN: {bond_isin})\n"
+                        f"⏳ До оферты осталось {days_left} {days_word} ({event_date.strftime('%d.%m.%Y')})\n\n"
+                        "⚠️ Важные заметки:\n"
+                        "• Сроки подачи заявок отличаются у разных брокеров\n"
+                        "• Проверьте условия оферты в официальных документах\n"
+                        "• Уточните дедлайн у вашего брокера заранее"
+                    )
+                    logging.debug(f"Message for offer: {message}")
+                # Отправка сообщения через JobQueue
+                if message:
+                    app.job_queue.run_once(
+                        async_send_notification,
+                        when=0,
+                        data={'user_id': user_id, 'message': message}
+
+                    )
+                    logging.debug(f"Scheduled job for user {user_id}")
+                # Сохранение уведомления в БД
                 new_notification = UserNotification(
-                    user_id=user_id,  # Используем параметр вместо user.tg_id
+                    user_id=user_id,
                     bond_isin=bond_isin,
                     event_type=event_type,
                     event_date=event_date,
                     is_sent=True,
-                    sent_at=datetime.utcnow()
+                    sent_at=datetime.utcnow(),
+                    days_left=days_left
                 )
                 session.add(new_notification)
-                await session.commit()  # Добавляем await
+                await session.commit()
+                logging.info(f"Уведомление для {user_id} ({event_type}) запланировано")
 
-                logging.info(f"Notification scheduled for user {user_id}, bond {bond_isin}, event {event_type}")
             else:
-                logging.info(f"Notification already exists for user {user_id}, bond {bond_isin}, event {event_type}")
+                logging.info(f"Уведомление уже существует: {user_id} {bond_isin} {event_type}")
 
     except Exception as e:
-        logging.exception(f"Error in notify_user_about_event: {e}")
+        logging.error(f"Ошибка в notify_user_about_event: {e}", exc_info=True)
         if 'session' in locals():
-            await session.rollback()  # Асинхронный откат
+            await session.rollback()
