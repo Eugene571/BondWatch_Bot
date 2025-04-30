@@ -7,7 +7,10 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from contextlib import asynccontextmanager
 
-engine = create_async_engine("sqlite+aiosqlite:///bot.database")
+engine = create_async_engine(
+    "postgresql+asyncpg://eugenebt:p8Wry5_#E&3@localhost/BondWatch",
+    echo=True  # Для отладки, можно отключить в продакшене
+)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 Base = declarative_base()
 
@@ -27,8 +30,8 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
-    tg_id = Column(BigInteger, unique=True)
-    full_name = Column(String)
+    tg_id = Column(BigInteger, unique=True, index=True)
+    full_name = Column(String(255))
 
     tracked_bonds = relationship("UserTracking", back_populates="user", cascade="all, delete-orphan")
     subscription = relationship("Subscription", uselist=False, back_populates="user")  # Связь с подпиской
@@ -42,10 +45,10 @@ class Subscription(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, ForeignKey("users.tg_id"))
     is_subscribed = Column(Boolean, default=False)
-    subscription_start = Column(DateTime, nullable=True)
-    subscription_end = Column(DateTime, nullable=True)
+    subscription_start = Column(TIMESTAMP, nullable=True)
+    subscription_end = Column(TIMESTAMP, nullable=True)
     payment_status = Column(String, nullable=True)
-    payment_date = Column(DateTime, nullable=True)
+    payment_date = Column(TIMESTAMP, nullable=True)
     payment_amount = Column(Float, nullable=True)
     plan = Column(String, nullable=True)  # Возможные значения: basic, optimal, pro
 
@@ -61,8 +64,8 @@ class BondsDatabase(Base):
     figi = Column(String, nullable=True)
     class_code = Column(String, nullable=True)
     ticker = Column(String, nullable=True)
-    added_at = Column(DateTime, default=datetime.utcnow)
-    last_updated = Column(DateTime, default=datetime.utcnow)
+    added_at = Column(TIMESTAMP, default=datetime.utcnow)
+    last_updated = Column(TIMESTAMP, default=datetime.utcnow)
     next_coupon_date = Column(Date, nullable=True)
     next_coupon_value = Column(Float, nullable=True)
     offer_date = Column(Date, nullable=True)
@@ -80,7 +83,7 @@ class UserTracking(Base):
     user_id = Column(BigInteger, ForeignKey("users.tg_id"), nullable=False)
     isin = Column(String, ForeignKey("bonds_database.isin"), nullable=False)
     quantity = Column(Integer, nullable=False, default=1)  # Новый столбец для хранения количества бумаг
-    added_at = Column(DateTime, default=datetime.utcnow)
+    added_at = Column(TIMESTAMP, default=datetime.utcnow)
 
     user = relationship("User", back_populates="tracked_bonds")
     bond = relationship("BondsDatabase", back_populates="tracking_users")
@@ -93,9 +96,9 @@ class UserNotification(Base):
     user_id = Column(BigInteger, ForeignKey("users.tg_id"), nullable=False)
     bond_isin = Column(String, ForeignKey("bonds_database.isin"), nullable=False)
     event_type = Column(String, nullable=False)  # Тип события (coupon, maturity)
-    event_date = Column(DateTime, nullable=False)  # Дата события
+    event_date = Column(TIMESTAMP, nullable=False)  # Дата события
     is_sent = Column(Boolean, default=False)  # Статус уведомления (отправлено или нет)
-    sent_at = Column(DateTime)  # Время отправки уведомления
+    sent_at = Column(TIMESTAMP)  # Время отправки уведомления
     days_left = Column(Integer)
     user = relationship("User", back_populates="notifications")
     bond = relationship("BondsDatabase")
