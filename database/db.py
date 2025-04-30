@@ -47,6 +47,7 @@ class Subscription(Base):
     payment_status = Column(String, nullable=True)
     payment_date = Column(DateTime, nullable=True)
     payment_amount = Column(Float, nullable=True)
+    plan = Column(String, nullable=True)  # Возможные значения: basic, optimal, pro
 
     user = relationship("User", back_populates="subscription")
 

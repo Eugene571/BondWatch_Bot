@@ -16,13 +16,11 @@ from telegram.ext import (
 import re
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import logging
-from datetime import datetime
 
 from bonds_get.bond_update import get_next_coupon
-from bonds_get.bond_utils import save_bond_events
-from bonds_get.moex_lookup import get_bondization_data_from_moex
 from bonds_get.moex_name_lookup import get_bond_name_from_moex
-from database.db import get_session, User, BondsDatabase, UserTracking
+from bot.subscription_utils import check_tracking_limit
+from database.db import get_session, User, BondsDatabase, UserTracking, Subscription
 
 ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{10}$')
 
@@ -42,13 +40,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db_user = User(tg_id=user.id, full_name=user.full_name)
             session.add(db_user)
             await session.commit()
+            subscription = Subscription(user_id=user.id, plan="free")
+            session.add(subscription)
+            await session.commit()
         context.bot_data.get("logger", print)(f"✅ Новый пользователь: {user.full_name} ({user.id})")
 
     await update.message.reply_text(
         f"👋 Привет, {user.first_name}!\n\n"
         "Я BondWatch — бот, который следит за купонами и погашениями твоих облигаций.\n\n"
         "📎 Отправь ISIN, чтобы я добавил бумагу и прислал напоминание о купонах и погашении.\n"
-        "Ты можешь бесплатно отслеживать до 3 бумаг.\n\n"
+        "Ты можешь бесплатно отслеживать 1 бумагу.\n\n"
         "🔔 Начнём!"
     )
 
@@ -93,7 +94,6 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return AWAITING_ISIN_TO_ADD
 
     async with get_session() as session:
-        # Получаем пользователя
         user_result = await session.execute(select(User).filter_by(tg_id=user.id))
         user_db = user_result.scalar()
 
@@ -101,14 +101,14 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Пожалуйста, сначала напиши /start.")
             return ConversationHandler.END
 
-        # Проверка лимита отслеживаемых бумаг
-        tracking_count = await session.scalar(
-            select(func.count()).select_from(UserTracking).filter_by(user_id=user_db.tg_id))
-        if tracking_count >= 10:
-            await update.message.reply_text("❌ Лимит отслеживаемых бумаг исчерпан.")
+        # Проверка лимита с учетом подписки
+        if not await check_tracking_limit(user_db.tg_id):
+            await update.message.reply_text(
+                "❌ Лимит отслеживаемых бумаг исчерпан.\n"
+                "Перейдите на платный тариф: /upgrade"
+            )
             return ConversationHandler.END
 
-        # Проверяем существующую запись
         tracking_result = await session.execute(
             select(UserTracking).filter_by(user_id=user_db.tg_id, isin=text)
         )
@@ -116,7 +116,6 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Эта бумага уже отслеживается.")
             return ConversationHandler.END
 
-        # Работа с облигацией
         bond_result = await session.execute(select(BondsDatabase).filter_by(isin=text))
         bond = bond_result.scalar()
 
@@ -126,7 +125,6 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session.add(bond)
             await session.commit()
 
-        # Обновление данных
         try:
             coupon = await get_next_coupon(bond.isin, bond.figi, bond, session)
             if coupon:
@@ -136,7 +134,6 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.warning(f"Ошибка обновления купона: {e}")
 
-        # Добавление отслеживания
         tracking = UserTracking(user_id=user_db.tg_id, isin=bond.isin)
         session.add(tracking)
         await session.commit()
@@ -266,6 +263,9 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 event_lines.append(
                     f"⬇️ Амортизация {bond.amortization_date} — {bond.amortization_value:.2f} руб."
                 )
+            if bond.offer_date:
+                event_lines.append(
+                    f"🤝📝 Оферта — {bond.offer_date}.")
 
             text += f"• {name}:\n" + "\n".join(event_lines) + "\n\n" if event_lines else "✨ Нет событий\n\n"
 
@@ -345,17 +345,119 @@ async def handle_change_quantity_callback(update: Update, context: ContextTypes.
         return AWAITING_QUANTITY
 
 
+# В раздел импортов добавьте:
+from datetime import datetime, timedelta
+
+
+# Добавьте новые обработчики в bot.handlers.py:
+
+async def upgrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    async with get_session() as session:
+        subscription = await session.scalar(
+            select(Subscription).where(Subscription.user_id == user.id)
+        )  # Исправлена синтаксическая ошибка
+
+        if not subscription:
+            await update.message.reply_text("❌ Подписка не найдена. Начните с /start")
+            return
+
+        text = f"📋 <b>Ваша текущая подписка</b>\n\n"
+        text += f"• Тариф: {subscription.plan.capitalize() if subscription.plan else 'Не активирован'}\n"
+
+        if subscription.payment_date:
+            next_payment = subscription.payment_date + timedelta(days=30)
+            text += f"• Следующее списание: {next_payment.strftime('%d.%m.%Y')}\n"
+
+        if subscription.subscription_end:
+            text += f"• Действует до: {subscription.subscription_end.strftime('%d.%m.%Y')}\n"
+
+        text += "\n🔐 <b>Доступные тарифы:</b>\n\n" \
+                "• Basic - 10 облигаций (390₽/мес)\n" \
+                "• Optimal - 20 облигаций (590₽/мес)\n" \
+                "• Pro - без ограничений (990₽/мес)\n\n" \
+                "Выберите новый тариф:"
+
+        keyboard = [
+            [InlineKeyboardButton("Basic", callback_data="upgrade_basic"),
+             InlineKeyboardButton("Optimal", callback_data="upgrade_optimal")],
+            [InlineKeyboardButton("Pro", callback_data="upgrade_pro")],
+            [InlineKeyboardButton("Отмена", callback_data="upgrade_cancel")]
+        ]
+
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
+
+
+async def handle_upgrade_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()  # Обязательно подтверждаем callback
+    user = query.from_user
+    action = query.data.split("_")[1]
+
+    async with get_session() as session:
+        subscription = await session.scalar(
+            select(Subscription).where(Subscription.user_id == user.id))
+
+        if not subscription:
+            await query.answer("❌ Ошибка подписки")
+            return
+
+        if action == "cancel":
+            await query.message.delete()
+            return
+
+        new_plan = action
+        price_map = {"basic": 290, "optimal": 590, "pro": 990}
+
+        is_upgrade_from_free = (subscription.plan == "free" and new_plan != "free")
+
+        # Обновляем данные подписки
+        if is_upgrade_from_free:
+            subscription.is_subscribed = True
+            subscription.subscription_start = datetime.now()
+            subscription.subscription_end = datetime.now() + timedelta(days=30)
+        elif new_plan == "free":  # Если вдруг будет опция downgrade
+            subscription.is_subscribed = False
+            subscription.subscription_start = None
+            subscription.subscription_end = None
+
+        subscription.plan = new_plan
+        subscription.payment_date = datetime.now()
+        subscription.payment_amount = price_map.get(new_plan, 0)
+
+        # Для платных тарифов обновляем срок действия
+        if new_plan != "free" and not is_upgrade_from_free:
+            subscription.subscription_end = subscription.subscription_end + timedelta(days=30)
+
+        await session.commit()
+
+        # Формируем ответ
+        response_text = (
+            f"✅ Тариф изменен на {new_plan.capitalize()}!\n"
+            f"Списано: {price_map[new_plan]}₽\n"
+            f"Следующее списание: {subscription.subscription_end.strftime('%d.%m.%Y')}"
+        )
+        await query.edit_message_text(response_text, parse_mode="HTML")
+
+
 def register_handlers(app: Application):
     # Основные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_tracked_bonds))
     app.add_handler(CommandHandler("events", show_events))
+    app.add_handler(CommandHandler("upgrade", upgrade_command))
+    app.add_handler(CallbackQueryHandler(handle_upgrade_callback, pattern="^upgrade_"))
 
     # Конверсация для добавления новой облигации
     add_conv = ConversationHandler(
         entry_points=[CommandHandler("add", add_command)],
         states={
-            AWAITING_ISIN_TO_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(ISIN_PATTERN), process_add_isin)],
+            AWAITING_ISIN_TO_ADD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(ISIN_PATTERN), process_add_isin)],
             AWAITING_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_quantity)],
         },
         fallbacks=[],
