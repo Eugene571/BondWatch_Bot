@@ -22,8 +22,13 @@ async def get_session():
 
 
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        print("Таблицы успешно созданы")
+    except Exception as e:
+        print(f"Ошибка при создании таблиц: {e}")
+        raise
 
 
 class User(Base):
