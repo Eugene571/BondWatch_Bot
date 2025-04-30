@@ -1,6 +1,6 @@
 # database.db.py
 
-from sqlalchemy import create_engine, Column, Integer, String, BigInteger, ForeignKey, DateTime, Date, Float, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, BigInteger, ForeignKey, DateTime, Date, Float, Boolean, TIMESTAMP
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
