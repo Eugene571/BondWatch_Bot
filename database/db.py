@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from contextlib import asynccontextmanager
 
 engine = create_async_engine(
-    "postgresql+asyncpg://eugenebt:p8Wry5_#E&3@localhost/BondWatch",
+    "postgresql+asyncpg://eugenebt:p8Wry5_#E&3@localhost/bondwatch",
     echo=True  # Для отладки, можно отключить в продакшене
 )
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
