@@ -395,20 +395,20 @@ async def process_remove_isin(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with get_session() as session:
-        # Асинхронный запрос пользователя с отслеживаемыми бумагами
         user_result = await session.execute(
             select(User)
             .options(selectinload(User.tracked_bonds))
-            .filter_by(tg_id=update.effective_user.id))
+            .filter_by(tg_id=update.effective_user.id)
+        )
         user = user_result.scalar()
 
         if not user or not user.tracked_bonds:
-            await update.message.reply_text("❗️ Вы пока что не отслеживаете ни одной облигации.\nДобавьте бумагу при помощи /add")
+            await update.message.reply_text(
+                "❗️ Вы пока что не отслеживаете ни одной облигации.\nДобавьте бумагу при помощи /add")
             return
 
         text = "📊 Ближайшие события по вашим облигациям:\n\n"
         for ut in user.tracked_bonds:
-            # Асинхронный запрос данных облигации
             bond_result = await session.execute(
                 select(BondsDatabase).filter_by(isin=ut.isin))
             bond = bond_result.scalar()
@@ -417,29 +417,50 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             name = bond.name or bond.isin
-            quantity = ut.quantity or 1  # На всякий случай, если quantity может быть None
-            total_coupon = quantity * (bond.next_coupon_value or 0)
-
-            # Формирование текста события
+            quantity = ut.quantity or 1
             event_lines = []
+
+            # Обработка купонов
             if bond.next_coupon_date:
+                coupon_status = []
+                if bond.next_coupon_value is not None:
+                    total_coupon = quantity * bond.next_coupon_value
+                    coupon_status.append(
+                        f"купон {bond.next_coupon_value:.2f} руб.\n"
+                        f"💰 Итого: {total_coupon:.2f} руб. для {quantity} шт."
+                    )
+                else:
+                    coupon_status.append("размер купона не указан")
+
                 event_lines.append(
-                    f"🏷️ {bond.next_coupon_date} — купон {bond.next_coupon_value:.2f} руб.\n"
-                    f"💰 Итого: {total_coupon:.2f} руб. для {quantity} облигаций"
+                    f"🏷️ {bond.next_coupon_date} — " + "\n".join(coupon_status)
                 )
 
+            # Погашение
             if bond.maturity_date:
                 event_lines.append(f"💸🔙 {bond.maturity_date} — погашение")
 
-            if bond.amortization_date and bond.amortization_value:
-                event_lines.append(
-                    f"⬇️ Амортизация {bond.amortization_date} — {bond.amortization_value:.2f} руб."
-                )
-            if bond.offer_date:
-                event_lines.append(
-                    f"🤝📝 Оферта — {bond.offer_date}.")
+            # Амортизация
+            if bond.amortization_date:
+                amort_status = []
+                if bond.amortization_value is not None:
+                    amort_status.append(f"{bond.amortization_value:.2f} руб.")
+                else:
+                    amort_status.append("сумма не указана")
 
-            text += f"• {name}:\n" + "\n".join(event_lines) + "\n\n" if event_lines else "✨ Нет событий\n\n"
+                event_lines.append(
+                    f"⬇️ Амортизация {bond.amortization_date} — " + "\n".join(amort_status)
+                )
+
+            # Оферта
+            if bond.offer_date:
+                event_lines.append(f"🤝📝 Оферта — {bond.offer_date}")
+
+            # Формирование блока
+            if event_lines:
+                text += f"• {name}:\n" + "\n".join([f"  {line}" for line in event_lines]) + "\n\n"
+            else:
+                text += f"• {name}:\n  ✨ Нет ближайших событий\n\n"
 
         await update.message.reply_text(text)
 
