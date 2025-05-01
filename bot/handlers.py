@@ -1,9 +1,10 @@
 # bot.handlers.py
+import html
 import sys
 
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
-from telegram import Update
+from telegram import Update, Message
 from telegram.ext import (
     CommandHandler,
     Application,
@@ -13,6 +14,7 @@ from telegram.ext import (
     ConversationHandler,
     CallbackQueryHandler
 )
+from telegram.constants import ParseMode
 import re
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import logging
@@ -28,6 +30,7 @@ AWAITING_ISIN_TO_REMOVE = 1
 AWAITING_ISIN_TO_ADD = 2
 AWAITING_QUANTITY = 3
 AWAITING_ISIN_TO_CHANGE = 4
+AWAITING_SUPPORT_MESSAGE = 5
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -47,11 +50,180 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"👋 Привет, {user.first_name}!\n\n"
-        "Я BondWatch — бот, который следит за купонами и погашениями твоих облигаций.\n\n"
-        "📎 Отправь ISIN, чтобы я добавил бумагу и прислал напоминание о купонах и погашении.\n"
-        "Ты можешь бесплатно отслеживать 1 бумагу.\n\n"
+        "Я BondWatch — бот, который следит за событиями по вашим облигациям.\n\n"
+        "📎 Введите /help для ознакомлением со списком команд\n"
+        "Вы можете бесплатно отслеживать 1 бумагу.\n"
+        "Для управлением тарифным планом используйте /upgrade\n\n"
         "🔔 Начнём!"
     )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+📚 <b>Список доступных команд</b>
+
+🔹 <b>Основные команды</b>
+/start - Начать работу  
+/help - Показать это сообщение  
+/list - Список отслеживаемых облигаций  
+/events - Ближайшие события  
+/upgrade - Управление подпиской  
+/support - Обратиться в поддержку (разрешена отправка изображений)
+
+🔹 <b>Управление облигациями</b>  
+/add - Добавить облигацию  
+/remove - Удалить облигацию  
+/change_quantity - Изменить количество бумаг  
+
+🔹 <b>Особенности работы</b>  
+📌 Бот работает только с <b>российскими облигациями</b>  
+📌 Обрабатываемые события:  
+ • Купоны  
+ • Амортизации  
+ • Погашения  
+ • Оферты  
+
+🔔 <b>Уведомления:</b>  
+⏰ Отправляются в 12:00 по МСК:  
+ • Купоны/амортизации - за 1 день до события  
+ • Погашения - за 7 дней  
+ • Оферты - за 14 дней  
+ • Уведомления отправляются единоразово
+
+⚠️ <b>Важно:</b>  
+Для участия в оферте необходимо заранее уточнять порядок действий у вашего брокера. Бот только информирует о дате оферты.  
+
+📌 <b>Как добавить облигацию?</b>  
+1. Найти ISIN на <a href="https://www.moex.com/">MOEX</a>  
+2. Отправить: <code>/add RU000A10AV15</code>  
+3. Указать количество бумаг  
+
+💎 <b>Тарифы:</b>  
+🔸 Бесплатно: 1 облигация  
+🔸 Платно: 10/20/∞ бумаг  
+
+❓ <b>Проблемы?</b> Напишите /support  
+    """
+    await update.message.reply_text(
+        help_text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        disable_notification=True
+    )
+
+
+async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Запрашивает текст обращения в поддержку."""
+    await update.message.reply_text(
+        "✍️ Напишите свой вопрос или проблему. Можно:\n"
+        "• Написать текст\n"
+        "• Отправить скриншот (как фото)\n\n"
+        "❌ Чтобы отменить, отправь /cancel",
+        parse_mode=ParseMode.HTML
+    )
+    return AWAITING_SUPPORT_MESSAGE
+
+
+async def process_support_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает медиафайлы (фото/документы) для поддержки"""
+    user = update.effective_user
+    caption = update.message.caption or "Без описания"
+
+    support_text = (
+        f"🆘 <b>Новое обращение с медиафайлом</b>\n\n"
+        f"👤 Пользователь: {user.full_name} (@{user.username or 'нет'}, ID: {user.id})\n"
+        f"📝 Описание: {caption}"
+    )
+
+    try:
+        # Отправляем админу (ваш tg_id: 247176848)
+        if update.message.photo:
+            photo_file = await update.message.photo[-1].get_file()
+            await context.bot.send_photo(
+                chat_id=247176848,
+                photo=photo_file.file_id,
+                caption=support_text,
+                parse_mode=ParseMode.HTML
+            )
+        elif update.message.document:
+            doc_file = await update.message.document.get_file()
+            await context.bot.send_document(
+                chat_id=247176848,
+                document=doc_file.file_id,
+                caption=support_text,
+                parse_mode=ParseMode.HTML
+            )
+
+        await update.message.reply_text("✅ Ваше обращение с медиафайлом отправлено в поддержку!")
+    except Exception as e:
+        logging.error(f"Ошибка отправки медиа в поддержку: {e}")
+        await update.message.reply_text("❌ Не удалось отправить медиафайл. Попробуйте позже.")
+
+    return ConversationHandler.END
+
+
+async def forward_text(user: User, text: str, context: ContextTypes.DEFAULT_TYPE):
+    support_text = (
+        f"🆘 <b>Новое обращение</b>\n"
+        f"👤 {user.mention_html()}\n"
+        f"🆔 ID: {user.id}\n\n"
+        f"📝 {html.escape(text)}"
+    )
+    await context.bot.send_message(
+        chat_id=247176848,
+        text=support_text,
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def forward_media(user: User, message: Message, caption: str, context: ContextTypes.DEFAULT_TYPE):
+    support_text = (
+        f"🆘 <b>Медиа от {user.mention_html()}</b>\n"
+        f"🆔 ID: {user.id}\n"
+        f"📝 {html.escape(caption)}"
+    )
+
+    if message.photo:
+        await context.bot.send_photo(
+            chat_id=247176848,
+            photo=message.photo[-1].file_id,
+            caption=support_text,
+            parse_mode=ParseMode.HTML
+        )
+    elif message.document:
+        await context.bot.send_document(
+            chat_id=247176848,
+            document=message.document.file_id,
+            caption=support_text,
+            parse_mode=ParseMode.HTML
+        )
+
+
+async def process_support_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        # Для сообщений с фото/документом и подписью
+        if update.message.caption or update.message.photo or update.message.document:
+            caption = update.message.caption or "Без описания"
+            await forward_media(user, update.message, caption, context)
+
+        # Для текстовых сообщений без медиа
+        elif update.message.text:
+            await forward_text(user, update.message.text, context)
+
+        await update.message.reply_text("✅ Ваше обращение принято!")
+
+    except Exception as e:
+        logging.error(f"Ошибка: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ Ошибка при отправке")
+
+    return ConversationHandler.END
+
+
+async def cancel_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отменяет диалог с поддержкой."""
+    await update.message.reply_text("❌ Отправка сообщения в поддержку отменена.")
+    return ConversationHandler.END
 
 
 async def list_tracked_bonds(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -64,10 +236,10 @@ async def list_tracked_bonds(update: Update, context: ContextTypes.DEFAULT_TYPE)
         user = result.scalar()
 
         if not user or not user.tracked_bonds:
-            await update.message.reply_text("❗️Ты пока не отслеживаешь ни одной облигации.")
+            await update.message.reply_text("❗️Вы пока не отслеживаете ни одной облигации.")
             return
 
-        text = "📋 Вот список твоих отслеживаемых бумаг:\n\n"
+        text = "📋 Вот список ваших отслеживаемых бумаг:\n\n"
         for ut in user.tracked_bonds:
             bond_result = await session.execute(select(BondsDatabase).filter_by(isin=ut.isin))
             bond = bond_result.scalar()
@@ -90,7 +262,7 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().upper()
 
     if not ISIN_PATTERN.match(text):
-        await update.message.reply_text("⚠️ Это не похоже на ISIN. Попробуй ещё раз.")
+        await update.message.reply_text("⚠️ Это не похоже на ISIN. Попробуйте ещё раз.")
         return AWAITING_ISIN_TO_ADD
 
     async with get_session() as session:
@@ -98,7 +270,7 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_db = user_result.scalar()
 
         if not user_db:
-            await update.message.reply_text("Пожалуйста, сначала напиши /start.")
+            await update.message.reply_text("Пожалуйста, сначала напишите /start.")
             return ConversationHandler.END
 
         # Проверка лимита с учетом подписки
@@ -188,12 +360,12 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("➕ Введи ISIN бумаги, которую хочешь добавить:")
+    await update.message.reply_text("➕ Введите ISIN бумаги, которую хотите добавить:")
     return AWAITING_ISIN_TO_ADD
 
 
 async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🗑 Введи ISIN бумаги, которую хочешь удалить из отслеживания:")
+    await update.message.reply_text("🗑 Введите ISIN бумаги, которую нужно удалить из отслеживания:")
     return AWAITING_ISIN_TO_REMOVE
 
 
@@ -205,7 +377,7 @@ async def process_remove_isin(update: Update, context: ContextTypes.DEFAULT_TYPE
         user = user_result.scalar()
 
         if not user:
-            await update.message.reply_text("Ты пока не зарегистрирован. Напиши /start.")
+            await update.message.reply_text("Вы пока что не зарегистрированы. Напишите /start.")
             return ConversationHandler.END
 
         tracking_result = await session.execute(
@@ -231,10 +403,10 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = user_result.scalar()
 
         if not user or not user.tracked_bonds:
-            await update.message.reply_text("❗️ Ты пока не отслеживаешь ни одной облигации.")
+            await update.message.reply_text("❗️ Вы пока что не отслеживаете ни одной облигации.\nДобавьте бумагу при помощи /add")
             return
 
-        text = "📊 Ближайшие события по твоим облигациям:\n\n"
+        text = "📊 Ближайшие события по вашим облигациям:\n\n"
         for ut in user.tracked_bonds:
             # Асинхронный запрос данных облигации
             bond_result = await session.execute(
@@ -282,7 +454,7 @@ async def change_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = user_result.scalar()
 
         if not user or not user.tracked_bonds:
-            await update.message.reply_text("❗️ Ты пока не отслеживаешь ни одной облигации.")
+            await update.message.reply_text("❗️ Вы пока что не отслеживаете ни одной облигации.\nДобавьте бумагу при помощи /add")
             return
 
         keyboard = []
@@ -300,7 +472,7 @@ async def change_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
 
         await update.message.reply_text(
-            "📋 Выбери облигацию для изменения количества:",
+            "📋 Выберите облигацию для изменения количества:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return AWAITING_ISIN_TO_CHANGE
@@ -314,11 +486,11 @@ async def process_change_quantity(update: Update, context: ContextTypes.DEFAULT_
         bond = bond_result.scalar()
 
         if not bond:
-            await update.message.reply_text("❌ Облигация не найдена. Попробуй снова.")
+            await update.message.reply_text("❌ Облигация не найдена. Попробуйте снова.")
             return
 
         context.user_data['isin'] = isin
-        await update.message.reply_text("🔢 Введи новое количество облигаций:")
+        await update.message.reply_text("🔢 Введите новое количество облигаций:")
         return AWAITING_QUANTITY
 
 
@@ -331,14 +503,14 @@ async def handle_change_quantity_callback(update: Update, context: ContextTypes.
         bond = bond_result.scalar()
 
         if not bond:
-            await query.answer("❌ Облигация не найдена. Попробуй снова.")
+            await query.answer("❌ Облигация не найдена. Попробуйте снова.")
             return
 
         context.user_data['isin'] = isin
         await query.answer()
 
         if query.message:
-            await query.message.reply_text("🔢 Введи новое количество облигаций:")
+            await query.message.reply_text("🔢 Введите новое количество облигаций:")
         else:
             await query.answer("❌ Ошибка. Сообщение недоступно.")
 
@@ -447,6 +619,7 @@ async def handle_upgrade_callback(update: Update, context: ContextTypes.DEFAULT_
 def register_handlers(app: Application):
     # Основные команды
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_tracked_bonds))
     app.add_handler(CommandHandler("events", show_events))
     app.add_handler(CommandHandler("upgrade", upgrade_command))
@@ -487,3 +660,19 @@ def register_handlers(app: Application):
         fallbacks=[],
     )
     app.add_handler(remove_conv)
+
+    # Конверсация для обращения в поддержку
+    support_conv = ConversationHandler(
+        entry_points=[CommandHandler("support", support_command)],
+        states={
+            AWAITING_SUPPORT_MESSAGE: [
+                MessageHandler(
+                    filters.TEXT | filters.PHOTO | filters.ATTACHMENT | filters.CAPTION,
+                    process_support_message
+                ),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_support)],
+        allow_reentry=True
+    )
+    app.add_handler(support_conv)
