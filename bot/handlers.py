@@ -24,7 +24,7 @@ from bonds_get.moex_name_lookup import get_bond_name_from_moex
 from bot.subscription_utils import check_tracking_limit
 from database.db import get_session, User, BondsDatabase, UserTracking, Subscription
 
-ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{10}$')
+ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
 
 AWAITING_ISIN_TO_REMOVE = 1
 AWAITING_ISIN_TO_ADD = 2
@@ -226,6 +226,11 @@ async def cancel_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Операция отменена.")
+    return ConversationHandler.END
+
+
 async def list_tracked_bonds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with get_session() as session:
         result = await session.execute(
@@ -261,8 +266,18 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip().upper()
 
+    if not text.isascii():
+        await update.message.reply_text("❌ ISIN должен содержать только латинские буквы и цифры\nВведите корректный ISIN повторно или используйте /cancel")
+        return AWAITING_ISIN_TO_ADD
+
     if not ISIN_PATTERN.match(text):
-        await update.message.reply_text("⚠️ Это не похоже на ISIN. Попробуйте ещё раз.")
+        await update.message.reply_text(
+            "⚠️ Неверный формат ISIN.\n"
+            "Формат: 2 буквы + 9 символов + 1 цифра.\n"
+            "Пример: RU000A0JX0J6\n"
+            "Введите корректный ISIN повторно или используйте /cancel"
+
+        )
         return AWAITING_ISIN_TO_ADD
 
     async with get_session() as session:
@@ -475,7 +490,8 @@ async def change_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = user_result.scalar()
 
         if not user or not user.tracked_bonds:
-            await update.message.reply_text("❗️ Вы пока что не отслеживаете ни одной облигации.\nДобавьте бумагу при помощи /add")
+            await update.message.reply_text(
+                "❗️ Вы пока что не отслеживаете ни одной облигации.\nДобавьте бумагу при помощи /add")
             return
 
         keyboard = []
@@ -651,10 +667,12 @@ def register_handlers(app: Application):
         entry_points=[CommandHandler("add", add_command)],
         states={
             AWAITING_ISIN_TO_ADD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(ISIN_PATTERN), process_add_isin)],
+                # Принимаем ЛЮБОЙ текст (включая неверные ISIN)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_add_isin)
+            ],
             AWAITING_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_quantity)],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("cancel", cancel)],  # Добавьте обработчик отмены
     )
     app.add_handler(add_conv)
 
