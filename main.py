@@ -50,7 +50,7 @@ async def main():
     )
     app.job_queue.run_daily(
         lambda ctx: asyncio.create_task(perform_nightly_sync()),
-        time(hour=14, minute=29)
+        time(hour=0, minute=5)
     )
     # Запуск бота
     logging.info("Bot started...")
