@@ -267,7 +267,8 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().upper()
 
     if not text.isascii():
-        await update.message.reply_text("❌ ISIN должен содержать только латинские буквы и цифры\nВведите корректный ISIN повторно или используйте /cancel")
+        await update.message.reply_text(
+            "❌ ISIN должен содержать только латинские буквы и цифры\nВведите корректный ISIN повторно или используйте /cancel")
         return AWAITING_ISIN_TO_ADD
 
     if not ISIN_PATTERN.match(text):
@@ -438,7 +439,7 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Обработка купонов
             if bond.next_coupon_date:
                 coupon_status = []
-                if bond.next_coupon_value is not None:
+                if bond.next_coupon_value is not None and bond.next_coupon_value != 0:
                     total_coupon = quantity * bond.next_coupon_value
                     coupon_status.append(
                         f"купон {bond.next_coupon_value:.2f} руб.\n"

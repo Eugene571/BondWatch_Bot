@@ -11,6 +11,7 @@ from config import TELEGRAM_TOKEN
 from bot.handlers import register_handlers
 from database.db import init_db
 from notification import check_and_notify_all
+from bonds_get.nightly_sync import perform_nightly_sync
 
 # Настройка кодировки и логирования
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', errors='ignore')
@@ -47,7 +48,10 @@ async def main():
         lambda ctx: asyncio.create_task(check_and_notify_all(ctx.application)),
         time(hour=9, minute=0)
     )
-
+    app.job_queue.run_daily(
+        lambda ctx: asyncio.create_task(perform_nightly_sync()),
+        time(hour=14, minute=29)
+    )
     # Запуск бота
     logging.info("Bot started...")
     await app.initialize()
