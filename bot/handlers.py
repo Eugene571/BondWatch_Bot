@@ -655,64 +655,49 @@ async def handle_upgrade_callback(update: Update, context: ContextTypes.DEFAULT_
 
 
 def register_handlers(app: Application):
-    # Основные команды
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("list", list_tracked_bonds))
-    app.add_handler(CommandHandler("events", show_events))
-    app.add_handler(CommandHandler("upgrade", upgrade_command))
-    app.add_handler(CallbackQueryHandler(handle_upgrade_callback, pattern="^upgrade_"))
+    # Высший приоритет: базовые команды и колбэки
+    app.add_handler(CommandHandler("start", start), group=0)
+    app.add_handler(CommandHandler("help", help_command), group=0)
+    app.add_handler(CommandHandler("list", list_tracked_bonds), group=0)
+    app.add_handler(CommandHandler("events", show_events), group=0)
+    app.add_handler(CallbackQueryHandler(handle_upgrade_callback, pattern="^upgrade_"), group=0)
 
-    # Конверсация для добавления новой облигации
-    add_conv = ConversationHandler(
-        entry_points=[CommandHandler("add", add_command)],
+    # Обработчики команд с состояниями (низший приоритет)
+    conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("add", add_command),
+            CommandHandler("remove", remove_command),
+            CommandHandler("change_quantity", change_quantity),
+            CommandHandler("support", support_command),
+            CommandHandler("upgrade", upgrade_command)
+        ],
         states={
             AWAITING_ISIN_TO_ADD: [
-                # Принимаем ЛЮБОЙ текст (включая неверные ISIN)
                 MessageHandler(filters.TEXT & ~filters.COMMAND, process_add_isin)
             ],
-            AWAITING_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_quantity)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],  # Добавьте обработчик отмены
-    )
-    app.add_handler(add_conv)
-
-    # Конверсация для изменения количества облигаций
-    change_quantity_conv = ConversationHandler(
-        entry_points=[CommandHandler("change_quantity", change_quantity)],
-        states={
-            AWAITING_ISIN_TO_CHANGE: [CallbackQueryHandler(handle_change_quantity_callback)],
-            AWAITING_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_quantity)],
-        },
-        fallbacks=[
-            MessageHandler(filters.TEXT & ~filters.COMMAND,
-                           lambda update, context: print(f"Fallback: {update.message.text}"))
-        ],
-    )
-    app.add_handler(change_quantity_conv)
-
-    # Конверсация для удаления облигации
-    remove_conv = ConversationHandler(
-        entry_points=[CommandHandler("remove", remove_command)],
-        states={
-            AWAITING_ISIN_TO_REMOVE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_remove_isin)],
-        },
-        fallbacks=[],
-    )
-    app.add_handler(remove_conv)
-
-    # Конверсация для обращения в поддержку
-    support_conv = ConversationHandler(
-        entry_points=[CommandHandler("support", support_command)],
-        states={
+            AWAITING_QUANTITY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_quantity)
+            ],
+            AWAITING_ISIN_TO_REMOVE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_remove_isin)
+            ],
+            AWAITING_ISIN_TO_CHANGE: [
+                CallbackQueryHandler(handle_change_quantity_callback)
+            ],
             AWAITING_SUPPORT_MESSAGE: [
                 MessageHandler(
                     filters.TEXT | filters.PHOTO | filters.ATTACHMENT | filters.CAPTION,
                     process_support_message
-                ),
+                )
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel_support)],
-        allow_reentry=True
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("cancel_support", cancel_support)
+        ],
+        allow_reentry=True,
+        per_chat=True,
+        per_user=True,
+        per_message=False
     )
-    app.add_handler(support_conv)
+    app.add_handler(conv_handler, group=1)
