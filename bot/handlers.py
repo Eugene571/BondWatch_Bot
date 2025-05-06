@@ -270,7 +270,7 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверка на латинские символы
     if not text.isascii():
         await update.message.reply_text(
-            "❌ ISIN должен содержать только латинские буквы и цифры\nВведите корректный ISIN повторно или используйте /cancel")
+            "❌ ISIN должен содержать только латинские буквы и цифры\nВведите корректный ISIN повторно")
         return AWAITING_ISIN_TO_ADD
 
     # Проверка формата ISIN
@@ -279,7 +279,7 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Неверный формат ISIN.\n"
             "Формат: 2 буквы + 9 символов + 1 цифра.\n"
             "Пример: RU000A0JX0J6\n"
-            "Введите корректный ISIN повторно или используйте /cancel"
+            "Введите корректный ISIN повторно"
         )
         return AWAITING_ISIN_TO_ADD
 
@@ -452,7 +452,7 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     total_coupon = quantity * bond.next_coupon_value
                     coupon_status.append(
                         f"купон {bond.next_coupon_value:.2f} руб.\n"
-                        f"💰 Итого: {total_coupon:.2f} руб. для {quantity} шт."
+                        f"💰Итого: {total_coupon:.2f} руб. для {quantity} шт."
                     )
                 else:
                     coupon_status.append("размер купона не указан")
