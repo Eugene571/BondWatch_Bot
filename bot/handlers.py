@@ -20,6 +20,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import logging
 
 from bonds_get.bond_update import get_next_coupon
+from bonds_get.bond_utils import is_bond
 from bonds_get.moex_name_lookup import get_bond_name_from_moex
 from bot.subscription_utils import check_tracking_limit
 from database.db import get_session, User, BondsDatabase, UserTracking, Subscription
@@ -266,18 +267,27 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip().upper()
 
+    # Проверка на латинские символы
     if not text.isascii():
         await update.message.reply_text(
             "❌ ISIN должен содержать только латинские буквы и цифры\nВведите корректный ISIN повторно или используйте /cancel")
         return AWAITING_ISIN_TO_ADD
 
+    # Проверка формата ISIN
     if not ISIN_PATTERN.match(text):
         await update.message.reply_text(
             "⚠️ Неверный формат ISIN.\n"
             "Формат: 2 буквы + 9 символов + 1 цифра.\n"
             "Пример: RU000A0JX0J6\n"
             "Введите корректный ISIN повторно или используйте /cancel"
+        )
+        return AWAITING_ISIN_TO_ADD
 
+    # Основная проверка на облигацию через MOEX API
+    if not await is_bond(text):
+        await update.message.reply_text(
+            "❌ Введен некорректный ISIN или бумага не является облигацией.\n"
+            "Проверьте правильность кода и попробуйте снова."
         )
         return AWAITING_ISIN_TO_ADD
 
@@ -298,8 +308,7 @@ async def process_add_isin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
 
         tracking_result = await session.execute(
-            select(UserTracking).filter_by(user_id=user_db.tg_id, isin=text)
-        )
+            select(UserTracking).filter_by(user_id=user_db.tg_id, isin=text))
         if tracking_result.scalar():
             await update.message.reply_text("✅ Эта бумага уже отслеживается.")
             return ConversationHandler.END
