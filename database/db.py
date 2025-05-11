@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from contextlib import asynccontextmanager
+import logging
 
 engine = create_async_engine(
     "postgresql+asyncpg://eugenebt:p8Wry5_#E&3@localhost/bondwatch",
@@ -56,6 +57,9 @@ class Subscription(Base):
     payment_date = Column(TIMESTAMP, nullable=True)
     payment_amount = Column(Float, nullable=True)
     plan = Column(String, nullable=True)  # Возможные значения: basic, optimal, pro
+    pending_payment_id = Column(String)  # Для хранения ID платежа
+    payment_method_id = Column(String)  # Для рекуррентных платежей
+    auto_renew = Column(Boolean, default=True)
 
     user = relationship("User", back_populates="subscription")
 
@@ -116,3 +120,12 @@ class UserNotification(Base):
         self.is_sent = is_sent
         self.sent_at = sent_at
         self.days_left = days_left
+
+
+async def close_db():
+    try:
+        await engine.dispose()
+        logging.info("Database connections closed")
+    except Exception as e:
+        logging.error(f"Error closing database: {e}")
+        raise

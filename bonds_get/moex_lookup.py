@@ -195,6 +195,7 @@ async def get_bondization_data_from_moex(isin: str) -> dict:
             "next_offer_date": None
         }
 
+
 async def get_all_bondization_data(isin: str) -> dict:
     """
     Получает полные данные по облигации с Мосбиржи с учетом пагинации.

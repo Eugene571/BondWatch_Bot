@@ -1,10 +1,16 @@
 # bot.handlers.py
+import asyncio
 import html
-import sys
+import logging
+import os
+import re
+from datetime import datetime, timedelta
 
-from sqlalchemy import select, func
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import Update, Message
+from telegram.constants import ParseMode
 from telegram.ext import (
     CommandHandler,
     Application,
@@ -12,18 +18,18 @@ from telegram.ext import (
     filters,
     MessageHandler,
     ConversationHandler,
-    CallbackQueryHandler
+    CallbackQueryHandler, PreCheckoutQueryHandler
 )
-from telegram.constants import ParseMode
-import re
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-import logging
+from yookassa import Configuration, Payment
 
 from bonds_get.bond_update import get_next_coupon
 from bonds_get.bond_utils import is_bond
 from bonds_get.moex_name_lookup import get_bond_name_from_moex
 from bot.subscription_utils import check_tracking_limit
 from database.db import get_session, User, BondsDatabase, UserTracking, Subscription
+
+Configuration.account_id = os.getenv("YOOKASSA_SHOP_ID")
+Configuration.secret_key = os.getenv("YOOKASSA_SECRET_KEY")
 
 ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
 
@@ -564,103 +570,232 @@ async def handle_change_quantity_callback(update: Update, context: ContextTypes.
         return AWAITING_QUANTITY
 
 
-# В раздел импортов добавьте:
-from datetime import datetime, timedelta
-
-
-# Добавьте новые обработчики в bot.handlers.py:
-
 async def upgrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    async with get_session() as session:
-        subscription = await session.scalar(
-            select(Subscription).where(Subscription.user_id == user.id)
-        )  # Исправлена синтаксическая ошибка
-
-        if not subscription:
-            await update.message.reply_text("❌ Подписка не найдена. Начните с /start")
-            return
-
-        text = f"📋 <b>Ваша текущая подписка</b>\n\n"
-        text += f"• Тариф: {subscription.plan.capitalize() if subscription.plan else 'Не активирован'}\n"
-
-        if subscription.payment_date:
-            next_payment = subscription.payment_date + timedelta(days=30)
-            text += f"• Следующее списание: {next_payment.strftime('%d.%m.%Y')}\n"
-
-        if subscription.subscription_end:
-            text += f"• Действует до: {subscription.subscription_end.strftime('%d.%m.%Y')}\n"
-
-        text += "\n🔐 <b>Доступные тарифы:</b>\n\n" \
-                "• Basic - 10 облигаций (390₽/мес)\n" \
-                "• Optimal - 20 облигаций (590₽/мес)\n" \
-                "• Pro - без ограничений (990₽/мес)\n\n" \
-                "Выберите новый тариф:"
-
-        keyboard = [
-            [InlineKeyboardButton("Basic", callback_data="upgrade_basic"),
-             InlineKeyboardButton("Optimal", callback_data="upgrade_optimal")],
-            [InlineKeyboardButton("Pro", callback_data="upgrade_pro")],
-            [InlineKeyboardButton("Отмена", callback_data="upgrade_cancel")]
-        ]
-
-        await update.message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="HTML"
-        )
+    await update.message.reply_text(
+        "🔐 <b>Доступные тарифы:</b>\n\n"
+        "• Basic - 10 облигаций (390₽/мес)\n"
+        "• Optimal - 20 облигаций (590₽/мес)\n"
+        "• Pro - без ограничений (990₽/мес)\n\n"
+        "Выберите тариф для оплаты:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"Basic - 390₽/мес", callback_data="upgrade_basic")],
+            [InlineKeyboardButton(f"Optimal - 590₽/мес", callback_data="upgrade_optimal")],
+            [InlineKeyboardButton(f"Pro - 990₽/мес", callback_data="upgrade_pro")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="upgrade_cancel")]
+        ]),
+        parse_mode="HTML"
+    )
 
 
 async def handle_upgrade_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()  # Обязательно подтверждаем callback
+    await query.answer()
     user = query.from_user
     action = query.data.split("_")[1]
 
+    if action == "cancel":
+        await query.message.delete()
+        return
+
+    price_map = {
+        "basic": 390.00,
+        "optimal": 590.00,
+        "pro": 990.00
+    }
+
     async with get_session() as session:
         subscription = await session.scalar(
-            select(Subscription).where(Subscription.user_id == user.id))
+            select(Subscription).where(Subscription.user_id == user.id)
+        )
 
         if not subscription:
             await query.answer("❌ Ошибка подписки")
             return
 
-        if action == "cancel":
-            await query.message.delete()
-            return
+        # Создаем платеж в YooKassa
+        payment = await create_yookassa_payment(
+            user_id=user.id,
+            amount=price_map[action],
+            plan=action
+        )
 
-        new_plan = action
-        price_map = {"basic": 290, "optimal": 590, "pro": 990}
+        # Сохраняем ID платежа во временных данных
+        context.user_data['pending_payment'] = {
+            "payment_id": payment.id,
+            "plan": action
+        }
 
-        is_upgrade_from_free = (subscription.plan == "free" and new_plan != "free")
+        # Отправляем пользователю ссылку на оплату
+        await query.message.reply_text(
+            f"⚠️ Для активации тарифа {action.capitalize()} оплатите {price_map[action]}₽\n"
+            f"Ссылка для оплаты: {payment.confirmation.confirmation_url}\n\n"
+            "После успешной оплаты подписка активируется автоматически в течение 2-3 минут."
+        )
+        await query.message.delete()
 
-        # Обновляем данные подписки
-        if is_upgrade_from_free:
+
+async def create_yookassa_payment(user_id: int, amount: float, plan: str):
+    try:
+        description = f"Тариф {plan.capitalize()} для BondWatch"  # Описание товара/услуги
+
+        payment_data = {
+            "amount": {
+                "value": f"{amount:.2f}",
+                "currency": "RUB"
+            },
+            "confirmation": {
+                "type": "redirect",
+                "return_url": "https://t.me/BondWatch_bot"  # Обязательно замените на реальный URL вашего бота
+            },
+            "description": description,
+            "metadata": {
+                "user_id": user_id,
+                "plan": plan
+            },
+            "receipt": {  # Добавляем данные чека
+                "customer": {
+                    "email": f"{user_id}@telegram.org"  # Пример email.  Важно!  Подставьте настоящий email пользователя, если он у вас есть.
+                },
+                "items": [
+                    {
+                        "description": description,
+                        "quantity": "1",
+                        "amount": {
+                            "value": f"{amount:.2f}",
+                            "currency": "RUB"
+                        },
+                        "vat_code": "1"  # Код НДС.  Уточните правильный код для вашего случая.
+                    }
+                ]
+            },
+            "save_payment_method": True # Сохранение платежного метода
+        }
+
+        payment = await asyncio.to_thread(
+            Payment.create,
+            payment_data
+        )
+
+        # Сохраняем ID платежа
+        async with get_session() as session:
+            subscription = await session.scalar(
+                select(Subscription).where(Subscription.user_id == user_id)
+            )
+            if subscription:
+                subscription.pending_payment_id = payment.id
+                await session.commit()
+
+        return payment
+    except Exception as e:
+        logging.error(f"Payment creation error: {str(e)}")
+        raise
+
+
+async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    await query.answer(ok=True)
+
+
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обрабатывает успешные платежи и обновляет статус подписки в базе данных.
+    """
+    user_id = update.message.from_user.id
+    payment_info = update.message.successful_payment
+    logging.info(f"Обработка платежа для user_id={user_id}")
+
+    try:
+        # Получаем данные платежа из YooKassa API
+        payment_id = payment_info.provider_payment_charge_id
+        payment = await asyncio.to_thread(Payment.find_one, payment_id)
+        plan = payment.metadata.get("plan", "basic")  # Извлекаем план из метаданных
+        logging.info(f"Получен план: {plan} для платежа {payment_id}")
+
+    except Exception as e:
+        logging.error(f"Ошибка получения данных платежа: {str(e)}")
+        plan = "basic"  # Fallback
+
+    async with get_session() as session:
+        try:
+            subscription = await session.scalar(
+                select(Subscription).where(Subscription.user_id == user_id)
+            )
+
+            if not subscription:
+                await update.message.reply_text("❌ Ошибка: Подписка не найдена.")
+                logging.error(f"Subscription not found for user {user_id}")
+                return
+
+            # Обновляем данные подписки
             subscription.is_subscribed = True
             subscription.subscription_start = datetime.now()
-            subscription.subscription_end = datetime.now() + timedelta(days=30)
-        elif new_plan == "free":  # Если вдруг будет опция downgrade
-            subscription.is_subscribed = False
-            subscription.subscription_start = None
-            subscription.subscription_end = None
+            subscription.plan = plan  # Устанавливаем план из метаданных
 
-        subscription.plan = new_plan
-        subscription.payment_date = datetime.now()
-        subscription.payment_amount = price_map.get(new_plan, 0)
+            # Устанавливаем срок действия подписки
+            duration = timedelta(days=30)
+            subscription.subscription_end = datetime.now() + duration
 
-        # Для платных тарифов обновляем срок действия
-        if new_plan != "free" and not is_upgrade_from_free:
-            subscription.subscription_end = subscription.subscription_end + timedelta(days=30)
+            # Обновляем платежные данные
+            subscription.payment_status = "success"
+            subscription.payment_date = datetime.now()
+            subscription.payment_amount = float(payment_info.total_amount / 100)
+            subscription.pending_payment_id = None  # Очищаем ожидающий платеж
 
-        await session.commit()
+            await session.commit()
+            logging.info(f"Подписка обновлена для user_id={user_id}")
 
-        # Формируем ответ
-        response_text = (
-            f"✅ Тариф изменен на {new_plan.capitalize()}!\n"
-            f"Списано: {price_map[new_plan]}₽\n"
-            f"Следующее списание: {subscription.subscription_end.strftime('%d.%m.%Y')}"
-        )
-        await query.edit_message_text(response_text, parse_mode="HTML")
+            # Отправляем подтверждение
+            await update.message.reply_text(
+                f"✅ Платеж успешен! Активирован тариф {plan.capitalize()}. "
+                f"Подписка активна до {subscription.subscription_end.strftime('%d.%m.%Y')}"
+            )
+
+        except Exception as e:
+            logging.critical(f"Ошибка обновления подписки: {str(e)}")
+            await session.rollback()
+            await update.message.reply_text("❌ Ошибка активации подписки. Пожалуйста, обратитесь в поддержку.")
+
+    context.user_data.clear()
+
+
+async def disable_auto_renew(user_id: int):
+    """Отключает автоплатежи для пользователя, удаляя payment_method_id."""
+    async with get_session() as session:
+        try:
+            result = await session.execute(
+                update(Subscription)
+                .where(Subscription.user_id == user_id)
+                .values(payment_method_id=None, auto_renew=False)  # Обновляем оба поля
+            )
+            await session.commit()
+            if result.rowcount > 0:
+                logging.info(f"Автоплатеж успешно отключен для пользователя {user_id}")
+                return True
+            else:
+                logging.warning(f"Подписка пользователя {user_id} не найдена.")
+                return False
+        except Exception as e:
+            logging.error(f"Ошибка при отключении автоплатежа для пользователя {user_id}: {e}")
+            await session.rollback()
+            return False
+
+
+async def inform_user_auto_renew_disabled(user_id: int, bot):
+    """Отправляет пользователю сообщение об отключении автоплатежа."""
+    try:
+        await bot.send_message(user_id, "Автоматическое продление подписки успешно отключено.")
+    except Exception as e:
+        logging.error(f"Ошибка при отправке сообщения пользователю {user_id} об отключении автоплатежа: {e}")
+
+
+# Пример использования:
+async def handle_disable_auto_renew_command(update, context):
+    user_id = update.message.from_user.id
+    if await disable_auto_renew(user_id):
+        await inform_user_auto_renew_disabled(user_id, context.bot)
+    else:
+        await context.bot.send_message(user_id,
+                                       "Не удалось отключить автоплатеж. Пожалуйста, обратитесь в службу поддержки.")
 
 
 def register_handlers(app: Application):
@@ -669,7 +804,11 @@ def register_handlers(app: Application):
     app.add_handler(CommandHandler("help", help_command), group=0)
     app.add_handler(CommandHandler("list", list_tracked_bonds), group=0)
     app.add_handler(CommandHandler("events", show_events), group=0)
+    app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     app.add_handler(CallbackQueryHandler(handle_upgrade_callback, pattern="^upgrade_"), group=0)
+    # Регистрируем новую команду для отключения автоплатежа
+    app.add_handler(CommandHandler("disable_autorenew", handle_disable_auto_renew_command), group=0)
 
     # Обработчики команд с состояниями (низший приоритет)
     conv_handler = ConversationHandler(
